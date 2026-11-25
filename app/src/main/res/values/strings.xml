@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Bizzly</string>
+    <string name="app_tagline">Gestion bar &amp; restaurant</string>
+    <string name="signature_brand">KLTUR COORPORATION</string>
+    <string name="signature_author">Jonathan Mambachaka</string>
+</resources>

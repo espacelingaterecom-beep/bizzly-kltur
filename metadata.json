@@ -1,0 +1,8 @@
+{
+  "name": "Bizzly",
+  "description": "Outil de gestion complet pour bar et restaurant : tables, caisse, ventes, stock, dépenses, bilan et menu QR.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
