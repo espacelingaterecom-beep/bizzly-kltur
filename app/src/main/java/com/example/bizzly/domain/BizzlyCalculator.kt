@@ -6,6 +6,7 @@ import com.example.bizzly.model.BrandColors
 import com.example.bizzly.model.BusinessAccount
 import com.example.bizzly.model.BusinessData
 import com.example.bizzly.model.BizzlyRole
+import com.example.bizzly.model.OpenTable
 import com.example.bizzly.model.Product
 import com.example.bizzly.model.ServerEntry
 import java.text.DecimalFormat
@@ -66,6 +67,16 @@ data class PeriodSnapshot(
     val dep: List<com.example.bizzly.model.CashMovement>,
     val vers: List<com.example.bizzly.model.CashMovement>,
     val bons: List<com.example.bizzly.model.CashMovement>
+)
+
+data class TableBillingBreakdown(
+    val grossSubtotal: Double,
+    val compedDiscount: Double,
+    val afterComped: Double,
+    val tableDiscount: Double,
+    val netTotal: Double,
+    val paidSoFar: Double,
+    val remainingDue: Double
 )
 
 object BizzlyCalculator {
@@ -302,14 +313,45 @@ object BizzlyCalculator {
         return picked
     }
 
+    fun calculateTableBreakdown(data: BusinessData, table: OpenTable): TableBillingBreakdown {
+        var gross = 0.0
+        var compedSavings = 0.0
+        for ((pidStr, rawQty) in table.it) {
+            val qty = clampNumber(rawQty).coerceAtLeast(0.0)
+            val p = productByIdStr(data, pidStr) ?: continue
+            val price = clampNumber(p.pv).coerceAtLeast(0.0)
+            gross += qty * price
+            val compQty = (table.comped[pidStr] ?: 0.0).coerceIn(0.0, qty)
+            compedSavings += compQty * price
+        }
+        val afterComped = (gross - compedSavings).coerceAtLeast(0.0)
+        val tableDisc = when (table.discountType) {
+            "percent" -> (afterComped * table.discountValue.coerceIn(0.0, 100.0) / 100.0).roundToLong().toDouble()
+            "amount" -> table.discountValue.coerceIn(0.0, afterComped)
+            else -> 0.0
+        }
+        val net = (afterComped - tableDisc).coerceAtLeast(0.0)
+        val paidSoFar = table.paidPartial.coerceIn(0.0, net)
+        val remaining = (net - paidSoFar).coerceAtLeast(0.0)
+        return TableBillingBreakdown(
+            grossSubtotal = gross,
+            compedDiscount = compedSavings,
+            afterComped = afterComped,
+            tableDiscount = tableDisc,
+            netTotal = net,
+            paidSoFar = paidSoFar,
+            remainingDue = remaining
+        )
+    }
+
     fun tableTotal(data: BusinessData, tableNum: Int): Double {
         val table = data.tb[tableNum.toString()] ?: return 0.0
-        var sum = 0.0
-        for ((pidStr, q) in table.it) {
-            val p = productByIdStr(data, pidStr) ?: continue
-            sum += clampNumber(q) * clampNumber(p.pv)
-        }
-        return sum
+        return calculateTableBreakdown(data, table).remainingDue
+    }
+
+    fun suggestedRestockQty(currentQty: Double, minThreshold: Double): Double {
+        val target = (minThreshold.coerceAtLeast(1.0) * 2.0)
+        return (target - currentQty.coerceAtLeast(0.0)).coerceAtLeast(1.0)
     }
 
     fun tableItemCount(data: BusinessData, tableNum: Int): Int {
@@ -397,21 +439,61 @@ object BizzlyCalculator {
         return current
     }
 
-    fun extractBrandPalette(bitmap: Bitmap): BrandColors? {
-        val scaled = Bitmap.createScaledBitmap(bitmap, 80, 80, true)
-        val pixels = IntArray(80 * 80)
-        scaled.getPixels(pixels, 0, 80, 0, 0, 80, 80)
-        if (scaled != bitmap) scaled.recycle()
+    fun rgbToHsl(rgb: Triple<Int, Int, Int>): Triple<Float, Float, Float> {
+        val r = rgb.first / 255f
+        val g = rgb.second / 255f
+        val b = rgb.third / 255f
+        val maxC = maxOf(r, g, b)
+        val minC = minOf(r, g, b)
+        val l = (maxC + minC) / 2f
+        if (maxC == minC) return Triple(0f, 0f, l)
+        val d = maxC - minC
+        val s = if (l > 0.5f) d / (2f - maxC - minC) else d / (maxC + minC)
+        val h = when (maxC) {
+            r -> ((g - b) / d + (if (g < b) 6f else 0f)) / 6f
+            g -> ((b - r) / d + 2f) / 6f
+            else -> ((r - g) / d + 4f) / 6f
+        }
+        return Triple(h * 360f, s, l)
+    }
 
+    fun hslToRgb(hDeg: Float, s: Float, l: Float): Triple<Int, Int, Int> {
+        val hue = ((hDeg % 360f) + 360f) % 360f / 360f
+        val sat = s.coerceIn(0f, 1f)
+        val light = l.coerceIn(0f, 1f)
+        if (sat == 0f) {
+            val v = (light * 255f).roundToInt().coerceIn(0, 255)
+            return Triple(v, v, v)
+        }
+        fun hue2rgb(p: Float, q: Float, tIn: Float): Float {
+            var t = tIn
+            if (t < 0f) t += 1f
+            if (t > 1f) t -= 1f
+            return when {
+                t < 1f / 6f -> p + (q - p) * 6f * t
+                t < 1f / 2f -> q
+                t < 2f / 3f -> p + (q - p) * (2f / 3f - t) * 6f
+                else -> p
+            }
+        }
+        val q = if (light < 0.5f) light * (1f + sat) else light + sat - light * sat
+        val p = 2f * light - q
+        val r = (hue2rgb(p, q, hue + 1f / 3f) * 255f).roundToInt().coerceIn(0, 255)
+        val g = (hue2rgb(p, q, hue) * 255f).roundToInt().coerceIn(0, 255)
+        val b = (hue2rgb(p, q, hue - 1f / 3f) * 255f).roundToInt().coerceIn(0, 255)
+        return Triple(r, g, b)
+    }
+
+    fun extractBrandThemeProposalsFromPixels(pixels: IntArray): List<com.example.bizzly.model.BrandThemeProposal> {
         data class Bucket(var n: Int = 0, var r: Long = 0, var g: Long = 0, var b: Long = 0)
         val buckets = HashMap<Int, Bucket>()
         for (px in pixels) {
             val a = (px ushr 24) and 0xFF
-            if (a < 140) continue
+            if (a < 128) continue
             val r = (px ushr 16) and 0xFF
             val g = (px ushr 8) and 0xFF
             val b = px and 0xFF
-            if (minOf(r, g, b) > 232) continue
+            if (minOf(r, g, b) > 235) continue
             val key = ((r shr 4) shl 8) or ((g shr 4) shl 4) or (b shr 4)
             val bucket = buckets.getOrPut(key) { Bucket() }
             bucket.n++
@@ -419,9 +501,9 @@ object BizzlyCalculator {
             bucket.g += g
             bucket.b += b
         }
-        if (buckets.isEmpty()) return null
+        if (buckets.isEmpty()) return emptyList()
 
-        data class Candidate(val c: Triple<Int, Int, Int>, val n: Int, val score: Double)
+        data class Candidate(val c: Triple<Int, Int, Int>, val n: Int, val sat: Double, val score: Double)
         val candidates = buckets.values.map { bk ->
             val r = (bk.r.toDouble() / bk.n).roundToInt()
             val g = (bk.g.toDouble() / bk.n).roundToInt()
@@ -429,47 +511,117 @@ object BizzlyCalculator {
             val mx = maxOf(r, g, b).toDouble()
             val mn = minOf(r, g, b).toDouble()
             val sat = if (mx > 0) (mx - mn) / mx else 0.0
-            Candidate(Triple(r, g, b), bk.n, bk.n * (0.25 + sat))
+            val lum = relativeLuminance(Triple(r, g, b))
+            val chromaBoost = if (sat > 0.22 && lum in 0.03..0.72) 1.4 else 1.0
+            Candidate(Triple(r, g, b), bk.n, sat, bk.n * (0.20 + sat * 1.35) * chromaBoost)
         }.sortedByDescending { it.score }
 
-        fun farFrom(c: Triple<Int, Int, Int>, picked: List<Triple<Int, Int, Int>>): Boolean {
-            return picked.all { p ->
-                val dx = (c.first - p.first).toDouble()
-                val dy = (c.second - p.second).toDouble()
-                val dz = (c.third - p.third).toDouble()
-                sqrt(dx * dx + dy * dy + dz * dz) > 80.0
-            }
+        fun colorDist(a: Triple<Int, Int, Int>, b: Triple<Int, Int, Int>): Double {
+            val dx = (a.first - b.first).toDouble()
+            val dy = (a.second - b.second).toDouble()
+            val dz = (a.third - b.third).toDouble()
+            return sqrt(dx * dx + dy * dy + dz * dz)
         }
 
-        var pr = candidates.first().c
-        val picked = mutableListOf(pr)
-        var sec: Triple<Int, Int, Int>? = null
-        var ax: Triple<Int, Int, Int>? = null
-        for (i in 1 until candidates.size) {
-            if (sec != null && ax != null) break
-            val cand = candidates[i]
-            if (cand.n >= 3 && farFrom(cand.c, picked)) {
-                if (sec == null) {
-                    sec = cand.c
-                    picked += sec
-                } else if (relativeLuminance(cand.c) > 0.03) {
-                    ax = cand.c
-                    picked += ax
+        fun tunePrimary(raw: Triple<Int, Int, Int>): Triple<Int, Int, Int> {
+            val lum = relativeLuminance(raw)
+            return when {
+                lum > 0.56 -> mixRgb(raw, Triple(0, 0, 0), 0.36)
+                lum < 0.025 -> {
+                    val (h, s, _) = rgbToHsl(raw)
+                    if (s > 0.12f) hslToRgb(h, s.coerceAtLeast(0.45f), 0.28f) else Triple(30, 41, 59)
                 }
+                else -> raw
             }
         }
-        if (relativeLuminance(pr) > 0.55) pr = mixRgb(pr, Triple(0, 0, 0), 0.35)
-        sec = if (sec == null) {
-            mixRgb(pr, Triple(0, 0, 0), 0.72)
-        } else if (relativeLuminance(sec) > 0.2) {
-            mixRgb(sec, Triple(0, 0, 0), 0.65)
-        } else sec
-        if (ax == null) ax = mixRgb(pr, Triple(255, 255, 255), 0.4)
 
-        return BrandColors(
-            pr = rgbToHex(pr.first, pr.second, pr.third),
-            sec = rgbToHex(sec.first, sec.second, sec.third),
-            ax = rgbToHex(ax.first, ax.second, ax.third)
+        fun tuneDark(raw: Triple<Int, Int, Int>): Triple<Int, Int, Int> {
+            val lum = relativeLuminance(raw)
+            return if (lum > 0.14) mixRgb(raw, Triple(8, 12, 22), 0.72) else raw
+        }
+
+        val picked = mutableListOf<Candidate>()
+        for (cand in candidates) {
+            if (picked.isEmpty() || picked.all { colorDist(cand.c, it.c) > 68.0 && cand.n >= 2 }) {
+                picked += cand
+                if (picked.size >= 5) break
+            }
+        }
+        val firstRaw = picked.first().c
+        val secondRaw = picked.getOrNull(1)?.c
+        val thirdRaw = picked.getOrNull(2)?.c
+
+        val pr1 = tunePrimary(firstRaw)
+        val (h1, s1, l1) = rgbToHsl(pr1)
+
+        val sec1 = if (secondRaw != null && relativeLuminance(secondRaw) < 0.25) {
+            tuneDark(secondRaw)
+        } else {
+            tuneDark(mixRgb(pr1, Triple(5, 10, 24), 0.76))
+        }
+
+        val ax1 = when {
+            thirdRaw != null && relativeLuminance(thirdRaw) > 0.06 -> thirdRaw
+            secondRaw != null && colorDist(secondRaw, pr1) > 70.0 && relativeLuminance(secondRaw) > 0.08 -> secondRaw
+            else -> hslToRgb(h1 + 155f, maxOf(0.68f, s1), l1.coerceIn(0.46f, 0.62f))
+        }
+
+        val proposal1 = com.example.bizzly.model.BrandThemeProposal(
+            name = "Fidèle au logo",
+            subtitle = "Couleurs dominantes extraites du logo",
+            brand = BrandColors(
+                pr = rgbToHex(pr1.first, pr1.second, pr1.third),
+                sec = rgbToHex(sec1.first, sec1.second, sec1.third),
+                ax = rgbToHex(ax1.first, ax1.second, ax1.third)
+            )
         )
+
+        // Proposal 2: Vivid / Secondary-led contrast
+        val rawPr2 = secondRaw?.takeIf { relativeLuminance(it) > 0.05 && colorDist(it, pr1) > 65.0 }
+            ?: hslToRgb(h1 + 32f, maxOf(0.72f, s1), l1.coerceIn(0.36f, 0.52f))
+        val pr2 = tunePrimary(rawPr2)
+        val sec2 = tuneDark(firstRaw)
+        val ax2 = if (colorDist(pr1, pr2) > 55.0) {
+            mixRgb(pr1, Triple(255, 255, 255), 0.14)
+        } else {
+            hslToRgb(h1 + 195f, 0.76f, 0.56f)
+        }
+        val proposal2 = com.example.bizzly.model.BrandThemeProposal(
+            name = "Vif & Contrasté",
+            subtitle = "Accent dynamique inspiré du logo",
+            brand = BrandColors(
+                pr = rgbToHex(pr2.first, pr2.second, pr2.third),
+                sec = rgbToHex(sec2.first, sec2.second, sec2.third),
+                ax = rgbToHex(ax2.first, ax2.second, ax2.third)
+            )
+        )
+
+        // Proposal 3: Refined & Deep
+        val pr3 = mixRgb(pr1, sec1, 0.34)
+        val sec3 = mixRgb(sec1, Triple(4, 8, 18), 0.45)
+        val ax3 = mixRgb(ax1, Triple(255, 255, 255), 0.18)
+        val proposal3 = com.example.bizzly.model.BrandThemeProposal(
+            name = "Élégant & Feutré",
+            subtitle = "Contraste doux pour un style moderne",
+            brand = BrandColors(
+                pr = rgbToHex(pr3.first, pr3.second, pr3.third),
+                sec = rgbToHex(sec3.first, sec3.second, sec3.third),
+                ax = rgbToHex(ax3.first, ax3.second, ax3.third)
+            )
+        )
+
+        return listOf(proposal1, proposal2, proposal3).distinctBy { "${it.brand.pr}:${it.brand.sec}:${it.brand.ax}" }
+    }
+
+    fun extractBrandThemeProposals(bitmap: Bitmap): List<com.example.bizzly.model.BrandThemeProposal> {
+        val scaled = Bitmap.createScaledBitmap(bitmap, 80, 80, true)
+        val pixels = IntArray(80 * 80)
+        scaled.getPixels(pixels, 0, 80, 0, 0, 80, 80)
+        if (scaled != bitmap) scaled.recycle()
+        return extractBrandThemeProposalsFromPixels(pixels)
+    }
+
+    fun extractBrandPalette(bitmap: Bitmap): BrandColors? {
+        return extractBrandThemeProposals(bitmap).firstOrNull()?.brand
     }
 }

@@ -1,7 +1,11 @@
 package com.example.bizzly
 
+import android.Manifest
+import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -12,11 +16,16 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -28,6 +37,8 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Restaurant
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -41,10 +52,14 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -57,6 +72,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.bizzly.model.BizzlyRole
 import com.example.bizzly.model.BizzlyTab
 import com.example.bizzly.ui.components.ConfirmActionDialog
 import com.example.bizzly.ui.components.ExportReadyDialog
@@ -66,6 +82,7 @@ import com.example.bizzly.ui.screens.CashScreen
 import com.example.bizzly.ui.screens.EnterpriseScreen
 import com.example.bizzly.ui.screens.HistoryScreen
 import com.example.bizzly.ui.screens.HomeScreen
+import com.example.bizzly.ui.screens.InventoryScreen
 import com.example.bizzly.ui.screens.MoreMenuScreen
 import com.example.bizzly.ui.screens.ProductsScreen
 import com.example.bizzly.ui.screens.QrMenuScreen
@@ -77,27 +94,63 @@ import com.example.bizzly.ui.theme.LocalBizzlyTokens
 import com.example.bizzly.ui.viewmodel.BizzlyUiState
 import com.example.bizzly.ui.viewmodel.BizzlyViewModel
 import com.example.bizzly.util.ExportUtils
+import com.example.bizzly.util.NotificationHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
+    private var externalTabRoute by mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        externalTabRoute = intent?.getStringExtra(NotificationHelper.EXTRA_OPEN_TAB)
         setContent {
             val vm: BizzlyViewModel = viewModel()
             val state by vm.uiState.collectAsStateWithLifecycle()
+            val isDark = state.isDarkTheme
+
+            LaunchedEffect(externalTabRoute) {
+                val route = externalTabRoute
+                if (!route.isNullOrBlank()) {
+                    vm.handleExternalTabRequest(route)
+                    externalTabRoute = null
+                }
+            }
+
+            DisposableEffect(isDark) {
+                enableEdgeToEdge(
+                    statusBarStyle = SystemBarStyle.auto(
+                        android.graphics.Color.TRANSPARENT,
+                        android.graphics.Color.TRANSPARENT
+                    ) { isDark },
+                    navigationBarStyle = SystemBarStyle.auto(
+                        android.graphics.Color.TRANSPARENT,
+                        android.graphics.Color.TRANSPARENT
+                    ) { isDark }
+                )
+                onDispose {}
+            }
 
             BizzlyTheme(
                 brand = state.activeBrand,
-                isDark = state.isDarkTheme
+                isDark = isDark
             ) {
                 BizzlyRootScreen(
                     state = state,
                     viewModel = vm
                 )
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val tab = intent.getStringExtra(NotificationHelper.EXTRA_OPEN_TAB)
+        if (!tab.isNullOrBlank()) {
+            externalTabRoute = tab
         }
     }
 }
@@ -126,6 +179,8 @@ private fun BizzlyRootScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    val lowStockInventory by viewModel.lowStockInventoryItems.collectAsStateWithLifecycle()
+
 
     val handleCreateDocumentResult: (android.net.Uri?) -> Unit = { uri ->
         val exp = state.readyExport
@@ -160,6 +215,25 @@ private fun BizzlyRootScreen(
         onResult = handleCreateDocumentResult
     )
 
+    var askedNotifOnce by rememberSaveable { mutableStateOf(false) }
+    val notifPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { }
+
+    LaunchedEffect(state.isLoggedIn, state.activeProfile?.role) {
+        val role = state.activeProfile?.let { BizzlyRole.fromKey(it.role) }
+        val shouldNotify = role == BizzlyRole.GERANT || role == BizzlyRole.CAISSE
+        if (state.isLoggedIn &&
+            shouldNotify &&
+            !askedNotifOnce &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !NotificationHelper.hasNotificationPermission(context)
+        ) {
+            askedNotifOnce = true
+            notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
     LaunchedEffect(state.toastTick) {
         val msg = state.toastMessage
         if (!msg.isNullOrBlank()) {
@@ -189,14 +263,19 @@ private fun BizzlyRootScreen(
                 contentWindowInsets = WindowInsets.safeDrawing,
                 snackbarHost = { SnackbarHost(snackbarHostState) }
             ) { innerPadding ->
-                Box(modifier = Modifier.padding(innerPadding)) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(innerPadding)
+                        .consumeWindowInsets(innerPadding)
+                ) {
                     AuthFlowScreen(state = state, viewModel = viewModel)
                 }
             }
         } else {
             val visibleNavTabs = mainNavTabs.filter { viewModel.canTab(it.tab) }
             val activeNavTab = when (state.currentTab) {
-                BizzlyTab.PROD, BizzlyTab.SRV, BizzlyTab.QR, BizzlyTab.HIST -> BizzlyTab.MORE
+                BizzlyTab.PROD, BizzlyTab.SRV, BizzlyTab.QR, BizzlyTab.HIST, BizzlyTab.INVENTORY -> BizzlyTab.MORE
                 else -> state.currentTab
             }
 
@@ -205,12 +284,12 @@ private fun BizzlyRootScreen(
 
                 Scaffold(
                     containerColor = tokens.background,
-                    contentWindowInsets = WindowInsets.safeDrawing,
+                    contentWindowInsets = WindowInsets.systemBars.union(WindowInsets.displayCutout),
                     snackbarHost = { SnackbarHost(snackbarHostState) },
                     bottomBar = {
                         if (!useRail) {
                             NavigationBar(
-                                containerColor = tokens.card,
+                                containerColor = tokens.navContainer,
                                 tonalElevation = 4.dp
                             ) {
                                 visibleNavTabs.forEach { item ->
@@ -219,10 +298,29 @@ private fun BizzlyRootScreen(
                                         selected = selected,
                                         onClick = { viewModel.selectTab(item.tab) },
                                         icon = {
-                                            Icon(
-                                                imageVector = item.icon,
-                                                contentDescription = item.label
-                                            )
+                                            val lowCount = if (item.tab == BizzlyTab.STOCK) lowStockInventory.size else 0
+                                            if (lowCount > 0) {
+                                                BadgedBox(
+                                                    badge = {
+                                                        Badge(
+                                                            containerColor = tokens.ko,
+                                                            contentColor = Color.White
+                                                        ) {
+                                                            Text(if (lowCount > 99) "99+" else lowCount.toString())
+                                                        }
+                                                    }
+                                                ) {
+                                                    Icon(
+                                                        imageVector = item.icon,
+                                                        contentDescription = item.label
+                                                    )
+                                                }
+                                            } else {
+                                                Icon(
+                                                    imageVector = item.icon,
+                                                    contentDescription = item.label
+                                                )
+                                            }
                                         },
                                         label = {
                                             Text(
@@ -235,7 +333,7 @@ private fun BizzlyRootScreen(
                                         colors = NavigationBarItemDefaults.colors(
                                             selectedIconColor = tokens.accentReadable,
                                             selectedTextColor = tokens.accentReadable,
-                                            indicatorColor = tokens.tint,
+                                            indicatorColor = tokens.navIndicator,
                                             unselectedIconColor = tokens.muted,
                                             unselectedTextColor = tokens.muted
                                         ),
@@ -250,10 +348,11 @@ private fun BizzlyRootScreen(
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(innerPadding)
+                            .consumeWindowInsets(innerPadding)
                     ) {
                         if (useRail) {
                             NavigationRail(
-                                containerColor = tokens.card,
+                                containerColor = tokens.navContainer,
                                 modifier = Modifier
                                     .fillMaxHeight()
                                     .padding(vertical = 8.dp)
@@ -264,10 +363,29 @@ private fun BizzlyRootScreen(
                                         selected = selected,
                                         onClick = { viewModel.selectTab(item.tab) },
                                         icon = {
-                                            Icon(
-                                                imageVector = item.icon,
-                                                contentDescription = item.label
-                                            )
+                                            val lowCount = if (item.tab == BizzlyTab.STOCK) lowStockInventory.size else 0
+                                            if (lowCount > 0) {
+                                                BadgedBox(
+                                                    badge = {
+                                                        Badge(
+                                                            containerColor = tokens.ko,
+                                                            contentColor = Color.White
+                                                        ) {
+                                                            Text(if (lowCount > 99) "99+" else lowCount.toString())
+                                                        }
+                                                    }
+                                                ) {
+                                                    Icon(
+                                                        imageVector = item.icon,
+                                                        contentDescription = item.label
+                                                    )
+                                                }
+                                            } else {
+                                                Icon(
+                                                    imageVector = item.icon,
+                                                    contentDescription = item.label
+                                                )
+                                            }
                                         },
                                         label = {
                                             Text(
@@ -279,7 +397,7 @@ private fun BizzlyRootScreen(
                                         colors = NavigationRailItemDefaults.colors(
                                             selectedIconColor = tokens.accentReadable,
                                             selectedTextColor = tokens.accentReadable,
-                                            indicatorColor = tokens.tint,
+                                            indicatorColor = tokens.navIndicator,
                                             unselectedIconColor = tokens.muted,
                                             unselectedTextColor = tokens.muted
                                         ),
@@ -292,7 +410,8 @@ private fun BizzlyRootScreen(
                         Box(
                             modifier = Modifier
                                 .weight(1f)
-                                .fillMaxHeight(),
+                                .fillMaxHeight()
+                                .imePadding(),
                             contentAlignment = Alignment.TopCenter
                         ) {
                             Column(
@@ -312,6 +431,7 @@ private fun BizzlyRootScreen(
                                     BizzlyTab.SRV -> EnterpriseScreen(state = state, viewModel = viewModel)
                                     BizzlyTab.QR -> QrMenuScreen(state = state, viewModel = viewModel)
                                     BizzlyTab.HIST -> HistoryScreen(state = state, viewModel = viewModel)
+                                    BizzlyTab.INVENTORY -> InventoryScreen(state = state, viewModel = viewModel)
                                 }
                             }
                         }

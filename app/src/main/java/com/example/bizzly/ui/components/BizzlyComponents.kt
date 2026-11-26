@@ -12,26 +12,36 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -53,11 +63,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -70,6 +87,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.example.R
 import com.example.bizzly.domain.BizzlyCalculator
+import com.example.bizzly.model.BrandColors
+import com.example.bizzly.model.BrandThemeProposal
 import com.example.bizzly.model.BusinessAccount
 import com.example.bizzly.model.SyncStatus
 import com.example.bizzly.ui.theme.LocalBizzlyTokens
@@ -197,139 +216,159 @@ fun BizzlyHeroHeader(
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = shape,
-        color = tokens.card,
-        shadowElevation = 2.dp,
+        color = Color.Transparent,
+        shadowElevation = 4.dp,
         border = BorderStroke(1.dp, tokens.border)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 14.dp)
+                .background(
+                    brush = Brush.linearGradient(
+                        colors = listOf(tokens.headerStart, tokens.headerEnd)
+                    )
+                )
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+            // Subtle branded accent top bar
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .background(tokens.accent)
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 14.dp)
             ) {
-                if (account != null) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        BusinessAvatarBox(account = account, size = 38.dp)
-                        Text(
-                            text = account.name,
-                            style = MaterialTheme.typography.titleMedium,
-                            color = tokens.text,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                } else {
-                    BizzlyLogoLockup(isDark = isDark, height = 34.dp)
-                }
-
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (onLockClick != null) {
+                    if (account != null) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            BusinessAvatarBox(account = account, size = 40.dp)
+                            Text(
+                                text = account.name,
+                                style = MaterialTheme.typography.titleMedium,
+                                color = tokens.onHeader,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    } else {
+                        BizzlyLogoLockup(isDark = true, height = 34.dp)
+                    }
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (onLockClick != null) {
+                            IconButton(
+                                onClick = onLockClick,
+                                modifier = Modifier
+                                    .size(48.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(tokens.headerControlBg)
+                                    .border(1.dp, tokens.headerControlBorder, RoundedCornerShape(10.dp))
+                                    .testTag("lock_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Lock,
+                                    contentDescription = "Verrouiller",
+                                    tint = tokens.onHeader,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        }
                         IconButton(
-                            onClick = onLockClick,
+                            onClick = onToggleTheme,
                             modifier = Modifier
                                 .size(48.dp)
                                 .clip(RoundedCornerShape(10.dp))
-                                .background(tokens.background)
-                                .border(1.dp, tokens.border, RoundedCornerShape(10.dp))
-                                .testTag("lock_button")
+                                .background(tokens.headerControlBg)
+                                .border(1.dp, tokens.headerControlBorder, RoundedCornerShape(10.dp))
+                                .testTag("theme_toggle_button")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Lock,
-                                contentDescription = "Verrouiller",
-                                tint = tokens.text,
+                                imageVector = if (isDark) Icons.Default.LightMode else Icons.Default.DarkMode,
+                                contentDescription = "Changer de thème",
+                                tint = tokens.onHeader,
                                 modifier = Modifier.size(20.dp)
                             )
                         }
                     }
-                    IconButton(
-                        onClick = onToggleTheme,
-                        modifier = Modifier
-                            .size(48.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(tokens.background)
-                            .border(1.dp, tokens.border, RoundedCornerShape(10.dp))
-                            .testTag("theme_toggle_button")
-                    ) {
-                        Icon(
-                            imageVector = if (isDark) Icons.Default.LightMode else Icons.Default.DarkMode,
-                            contentDescription = "Changer de thème",
-                            tint = tokens.text,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
                 }
-            }
 
-            Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(10.dp))
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = tokens.muted,
-                    modifier = Modifier.weight(1f)
-                )
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    if (!roleLabel.isNullOrBlank()) {
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(99.dp))
-                                .background(tokens.tint)
-                                .padding(horizontal = 10.dp, vertical = 4.dp)
-                        ) {
-                            Text(
-                                text = roleLabel,
-                                color = tokens.accentReadable,
-                                fontSize = 11.5.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = tokens.onHeaderMuted,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (!roleLabel.isNullOrBlank()) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(99.dp))
+                                    .background(tokens.accent)
+                                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = roleLabel,
+                                    color = tokens.onAccent,
+                                    fontSize = 11.5.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        }
+                        if (syncStatus != null && syncStatus != SyncStatus.OFF) {
+                            SyncBadgeChip(syncStatus, onHeaderSurface = true)
                         }
                     }
-                    if (syncStatus != null && syncStatus != SyncStatus.OFF) {
-                        SyncBadgeChip(syncStatus)
-                    }
                 }
-            }
 
-            if (extraContent != null) {
-                Spacer(modifier = Modifier.height(12.dp))
-                extraContent()
+                if (extraContent != null) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    extraContent()
+                }
             }
         }
     }
 }
 
 @Composable
-fun SyncBadgeChip(status: SyncStatus) {
+fun SyncBadgeChip(status: SyncStatus, onHeaderSurface: Boolean = false) {
     val tokens = LocalBizzlyTokens.current
     val dotColor = when (status) {
         SyncStatus.OK -> tokens.ok
         SyncStatus.SYNCING -> tokens.warn
         SyncStatus.ERROR, SyncStatus.OFF -> tokens.ko
     }
+    val bg = if (onHeaderSurface) tokens.headerControlBg else tokens.background
+    val bd = if (onHeaderSurface) tokens.headerControlBorder else tokens.border
+    val fg = if (onHeaderSurface) tokens.onHeader else tokens.muted
     Row(
         modifier = Modifier
             .clip(RoundedCornerShape(99.dp))
-            .background(tokens.background)
-            .border(1.dp, tokens.border, RoundedCornerShape(99.dp))
+            .background(bg)
+            .border(1.dp, bd, RoundedCornerShape(99.dp))
             .padding(horizontal = 8.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(5.dp)
@@ -342,7 +381,7 @@ fun SyncBadgeChip(status: SyncStatus) {
         )
         Text(
             text = status.chipLabel,
-            color = tokens.muted,
+            color = fg,
             fontSize = 11.sp,
             fontWeight = FontWeight.Medium
         )
@@ -361,18 +400,23 @@ fun HeroPrimaryHighlight(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
-            .background(tokens.primary)
+            .background(
+                brush = Brush.linearGradient(
+                    colors = listOf(tokens.heroHighlightStart, tokens.heroHighlightEnd)
+                )
+            )
+            .border(1.dp, tokens.accent.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
             .padding(16.dp)
     ) {
         Box(
             modifier = Modifier
                 .clip(RoundedCornerShape(99.dp))
-                .background(Color.White)
+                .background(tokens.accent)
                 .padding(horizontal = 12.dp, vertical = 4.dp)
         ) {
             Text(
                 text = pillText,
-                color = tokens.accentOnLight,
+                color = tokens.onAccent,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold
             )
@@ -383,12 +427,12 @@ fun HeroPrimaryHighlight(
             fontFamily = SoraFontFamily,
             fontWeight = FontWeight.Bold,
             fontSize = 32.sp,
-            color = valueColor ?: tokens.onPrimary
+            color = valueColor ?: tokens.onHeroHighlight
         )
         Text(
             text = caption,
             fontSize = 12.5.sp,
-            color = tokens.onPrimary.copy(alpha = 0.85f)
+            color = tokens.onHeroHighlight.copy(alpha = 0.85f)
         )
     }
 }
@@ -899,32 +943,248 @@ private fun ColorPickerDialog(
 }
 
 @Composable
-fun BizzlySignatureFooter() {
+fun LogoThemeProposalsSection(
+    proposals: List<BrandThemeProposal>,
+    currentBrand: BrandColors,
+    onSelectProposal: (BrandColors) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (proposals.isEmpty()) return
     val tokens = LocalBizzlyTokens.current
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Palette,
+                contentDescription = null,
+                tint = tokens.accentReadable,
+                modifier = Modifier.size(16.dp)
+            )
+            Text(
+                text = "Thèmes proposés d’après votre logo",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = tokens.text
+            )
+        }
+        proposals.forEachIndexed { idx, proposal ->
+            val selected = proposal.brand == currentBrand
+            val prRgb = BizzlyCalculator.hexToRgb(proposal.brand.pr)
+            val secRgb = BizzlyCalculator.hexToRgb(proposal.brand.sec)
+            val axRgb = BizzlyCalculator.hexToRgb(proposal.brand.ax)
+            val prC = Color(prRgb.first, prRgb.second, prRgb.third)
+            val secC = Color(secRgb.first, secRgb.second, secRgb.third)
+            val axC = Color(axRgb.first, axRgb.second, axRgb.third)
+
+            Surface(
+                onClick = { onSelectProposal(proposal.brand) },
+                shape = RoundedCornerShape(12.dp),
+                color = if (selected) tokens.surfaceTint else tokens.inputBg,
+                border = BorderStroke(
+                    width = if (selected) 2.dp else 1.dp,
+                    color = if (selected) tokens.primary else tokens.border
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("logo_theme_proposal_$idx")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .size(22.dp)
+                                .clip(CircleShape)
+                                .background(prC)
+                                .border(1.dp, tokens.border, CircleShape)
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(22.dp)
+                                .clip(CircleShape)
+                                .background(secC)
+                                .border(1.dp, tokens.border, CircleShape)
+                        )
+                        Box(
+                            modifier = Modifier
+                                .size(22.dp)
+                                .clip(CircleShape)
+                                .background(axC)
+                                .border(1.dp, tokens.border, CircleShape)
+                        )
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = proposal.name,
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = tokens.text
+                        )
+                        Text(
+                            text = proposal.subtitle,
+                            fontSize = 11.5.sp,
+                            color = tokens.muted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    if (selected) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Sélectionné",
+                            tint = tokens.accentReadable,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun BizzlySignatureFooter(
+    onAdminClick: (() -> Unit)? = null
+) {
+    val tokens = LocalBizzlyTokens.current
+    var tapCount by remember { mutableIntStateOf(0) }
+    var activeLegalTab by remember { mutableStateOf<LegalDocumentTab?>(null) }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 20.dp, bottom = 10.dp),
+            .padding(top = 18.dp, bottom = 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text(
-            text = "FAIT PAR",
-            fontSize = 10.sp,
-            letterSpacing = 2.sp,
-            color = tokens.muted.copy(alpha = 0.8f)
-        )
-        Text(
-            text = stringResource(id = R.string.signature_brand),
-            fontFamily = SoraFontFamily,
-            fontWeight = FontWeight.Bold,
-            fontSize = 13.sp,
-            letterSpacing = 1.2.sp,
-            color = tokens.text
-        )
-        Text(
-            text = stringResource(id = R.string.signature_author),
-            fontSize = 12.sp,
-            color = tokens.muted
+        Column(
+            modifier = Modifier
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                ) {
+                    tapCount++
+                    if (tapCount >= 5) {
+                        tapCount = 0
+                        onAdminClick?.invoke()
+                    }
+                }
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "FAIT PAR",
+                fontSize = 10.sp,
+                letterSpacing = 2.sp,
+                color = tokens.muted.copy(alpha = 0.8f)
+            )
+            Text(
+                text = stringResource(id = R.string.signature_brand),
+                fontFamily = SoraFontFamily,
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.sp,
+                letterSpacing = 1.2.sp,
+                color = tokens.text
+            )
+            Text(
+                text = stringResource(id = R.string.signature_author),
+                fontSize = 12.sp,
+                color = tokens.muted
+            )
+        }
+
+        FlowRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 4.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalArrangement = Arrangement.Center
+        ) {
+            TextButton(
+                onClick = { activeLegalTab = LegalDocumentTab.PRIVACY },
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("footer_legal_privacy")
+            ) {
+                Text(
+                    text = "Confidentialité",
+                    fontSize = 11.5.sp,
+                    color = tokens.accentReadable
+                )
+            }
+            TextButton(
+                onClick = { activeLegalTab = LegalDocumentTab.TERMS },
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("footer_legal_terms")
+            ) {
+                Text(
+                    text = "Conditions d’utilisation",
+                    fontSize = 11.5.sp,
+                    color = tokens.accentReadable
+                )
+            }
+            TextButton(
+                onClick = { activeLegalTab = LegalDocumentTab.LEGAL_NOTICE },
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("footer_legal_notice")
+            ) {
+                Text(
+                    text = "Mentions légales",
+                    fontSize = 11.5.sp,
+                    color = tokens.accentReadable
+                )
+            }
+        }
+    }
+
+    if (activeLegalTab != null) {
+        LegalDocumentsDialog(
+            initialTab = activeLegalTab!!,
+            onDismiss = { activeLegalTab = null }
         )
     }
 }
+
+fun Modifier.bringIntoViewOnIme(): Modifier = composed {
+    val requester = remember { BringIntoViewRequester() }
+    var isFocused by remember { mutableStateOf(false) }
+    var fieldSize by remember { mutableStateOf(IntSize.Zero) }
+    val density = LocalDensity.current
+    val imeBottom = WindowInsets.ime.getBottom(density)
+
+    LaunchedEffect(isFocused, imeBottom) {
+        if (isFocused && imeBottom > 0) {
+            val extraPx = with(density) { 20.dp.toPx() }
+            val rect = if (fieldSize.width > 0 && fieldSize.height > 0) {
+                Rect(
+                    left = 0f,
+                    top = -extraPx,
+                    right = fieldSize.width.toFloat(),
+                    bottom = fieldSize.height.toFloat() + extraPx
+                )
+            } else null
+            requester.bringIntoView(rect)
+        }
+    }
+
+    this
+        .bringIntoViewRequester(requester)
+        .onSizeChanged { fieldSize = it }
+        .onFocusChanged { isFocused = it.isFocused }
+}
+

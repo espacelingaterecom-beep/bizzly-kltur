@@ -30,6 +30,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,6 +51,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.bizzly.domain.BizzlyCalculator
 import com.example.bizzly.domain.ProductSalesItem
 import com.example.bizzly.domain.StockAlertLevel
@@ -95,6 +97,7 @@ fun HomeScreen(
         if (p.name == r.label) r.label else "${p.name} · ${r.label}"
     }
     val lowStock = BizzlyCalculator.lowStockProducts(data)
+    val lowStockInventory by viewModel.lowStockInventoryItems.collectAsStateWithLifecycle()
 
     Column(modifier = Modifier.fillMaxWidth()) {
         BizzlyHeroHeader(
@@ -222,7 +225,39 @@ fun HomeScreen(
                 )
             }
 
-            // Low stock alert card
+            // Low stock alert card (Room Inventory)
+            if (lowStockInventory.isNotEmpty()) {
+                val hasOut = lowStockInventory.any { it.quantity <= 0.0 }
+                BizzlyCard(
+                    borderColor = if (hasOut) tokens.ko else tokens.warn,
+                    onClick = { viewModel.selectTab(BizzlyTab.STOCK) },
+                    modifier = Modifier.testTag("home_low_stock_inventory_card")
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .size(11.dp)
+                                .clip(CircleShape)
+                                .background(if (hasOut) tokens.ko else tokens.warn)
+                        )
+                        Text(
+                            text = "Alertes inventaire : ${lowStockInventory.size} article${if (lowStockInventory.size > 1) "s" else ""}",
+                            fontWeight = FontWeight.Bold,
+                            color = tokens.text
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = lowStockInventory.take(6).joinToString(" · ") { item ->
+                            "${item.name} (${BizzlyCalculator.formatQty(item.quantity)})"
+                        } + if (lowStockInventory.size > 6) " …" else "",
+                        fontSize = 13.sp,
+                        color = tokens.muted
+                    )
+                }
+            }
+
+            // Low stock alert card (Bar)
             if (lowStock.isNotEmpty()) {
                 val hasCritical = lowStock.any { it.second.level == StockAlertLevel.CRITICAL }
                 BizzlyCard(

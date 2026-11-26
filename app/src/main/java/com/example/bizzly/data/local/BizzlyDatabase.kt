@@ -10,6 +10,8 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "business_accounts")
@@ -83,17 +85,56 @@ interface BizzlyDao {
     entities = [
         BusinessAccountEntity::class,
         BusinessDataEntity::class,
-        SyncStateEntity::class
+        SyncStateEntity::class,
+        InventoryItemEntity::class
     ],
-    version = 1,
+    version = 4,
     exportSchema = false
 )
 abstract class BizzlyDatabase : RoomDatabase() {
     abstract fun bizzlyDao(): BizzlyDao
+    abstract fun inventoryDao(): InventoryDao
 
     companion object {
         @Volatile
         private var instance: BizzlyDatabase? = null
+
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Handled in MIGRATION_3_4
+            }
+        }
+
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP TABLE IF EXISTS `inventory_items`")
+            }
+        }
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `inventory_items` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `businessId` TEXT NOT NULL,
+                        `productId` INTEGER,
+                        `name` TEXT NOT NULL,
+                        `sku` TEXT NOT NULL,
+                        `category` TEXT NOT NULL,
+                        `unit` TEXT NOT NULL,
+                        `quantity` REAL NOT NULL,
+                        `minThreshold` REAL NOT NULL,
+                        `unitPrice` REAL NOT NULL,
+                        `notes` TEXT NOT NULL,
+                        `updatedAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_inventory_items_businessId` ON `inventory_items` (`businessId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_inventory_items_businessId_quantity` ON `inventory_items` (`businessId`, `quantity`)")
+            }
+        }
 
         fun getInstance(context: Context): BizzlyDatabase {
             return instance ?: synchronized(this) {
@@ -101,7 +142,10 @@ abstract class BizzlyDatabase : RoomDatabase() {
                     context.applicationContext,
                     BizzlyDatabase::class.java,
                     "bizzly_local.db"
-                ).build().also { instance = it }
+                )
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .build()
+                    .also { instance = it }
             }
         }
     }

@@ -165,7 +165,22 @@ class SupabaseSyncClient(private val repository: BizzlyRepository) {
             }
         }
         for ((tableKey, tbl) in prepped.tb) {
-            docs["tb/$tableKey"] = canonicalJson(JsonObject(mapOf("sv" to JsonPrimitive(tbl.sv))))
+            val tbMap = LinkedHashMap<String, JsonElement>()
+            tbMap["sv"] = JsonPrimitive(tbl.sv)
+            if (tbl.comped.isNotEmpty()) {
+                tbMap["comped"] = JsonObject(tbl.comped.mapValues { JsonPrimitive(it.value) })
+            }
+            if (tbl.discountType != "none" && tbl.discountValue > 0.0) {
+                tbMap["discountType"] = JsonPrimitive(tbl.discountType)
+                tbMap["discountValue"] = JsonPrimitive(tbl.discountValue)
+            }
+            if (tbl.discountReason.isNotBlank()) {
+                tbMap["discountReason"] = JsonPrimitive(tbl.discountReason)
+            }
+            if (tbl.paidPartial > 0.0) tbMap["paidPartial"] = JsonPrimitive(tbl.paidPartial)
+            if (tbl.paidCount > 0) tbMap["paidCount"] = JsonPrimitive(tbl.paidCount)
+            if (tbl.splitTotalParts > 0) tbMap["splitTotalParts"] = JsonPrimitive(tbl.splitTotalParts)
+            docs["tb/$tableKey"] = canonicalJson(JsonObject(tbMap))
             for ((pidStr, q) in tbl.it) {
                 if (q != 0.0) {
                     docs["ti/$tableKey/$pidStr"] = if (q % 1.0 == 0.0) q.toLong().toString() else q.toString()
@@ -204,9 +219,8 @@ class SupabaseSyncClient(private val repository: BizzlyRepository) {
 
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-            val body = stream?.let {
-                BufferedReader(InputStreamReader(it, StandardCharsets.UTF_8)).use { r -> r.readText() }
-            }.orEmpty()
+            val body = stream?.use { BizzlyRepository.readStreamBoundedUtf8(it, 16 * 1024 * 1024) }
+                ?: if (stream != null) throw SyncException("Réponse serveur trop volumineuse.") else ""
 
             if (code !in 200..299) {
                 val parsedMsg = runCatching {
@@ -230,6 +244,114 @@ class SupabaseSyncClient(private val repository: BizzlyRepository) {
             conn.disconnect()
         }
     }
+
+    data class SupabaseAdminSession(
+        val email: String,
+        val accessToken: String
+    )
+
+    data class RemoteSpaceOverview(
+        val syncKey: String,
+        val name: String,
+        val createdAt: String = ""
+    )
+
+    suspend fun signInSupabaseAdmin(email: String, password: String): SupabaseAdminSession = withContext(Dispatchers.IO) {
+        val url = URL("${BuildConfig.SUPABASE_URL}/auth/v1/token?grant_type=password")
+        val conn = (url.openConnection() as HttpURLConnection)
+        try {
+            conn.requestMethod = "POST"
+            conn.connectTimeout = 20_000
+            conn.readTimeout = 20_000
+            conn.doOutput = true
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("apikey", BuildConfig.SUPABASE_PUBLISHABLE_KEY)
+
+            val payload = JsonObject(
+                mapOf(
+                    "email" to JsonPrimitive(email.trim()),
+                    "password" to JsonPrimitive(password)
+                )
+            )
+            OutputStreamWriter(conn.outputStream, StandardCharsets.UTF_8).use { writer ->
+                writer.write(payload.toString())
+            }
+
+            val code = conn.responseCode
+            val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+            val body = stream?.use { BizzlyRepository.readStreamBoundedUtf8(it, 2 * 1024 * 1024) }.orEmpty()
+
+            if (code !in 200..299) {
+                val msg = runCatching {
+                    val obj = json.parseToJsonElement(body).jsonObject
+                    obj["error_description"]?.jsonPrimitive?.content
+                        ?: obj["msg"]?.jsonPrimitive?.content
+                        ?: obj["message"]?.jsonPrimitive?.content
+                }.getOrNull() ?: "Identifiants Supabase incorrects."
+                throw SyncException(msg, isInvalidKey = true, isOffline = false)
+            }
+
+            val root = json.parseToJsonElement(body).jsonObject
+            val token = root["access_token"]?.jsonPrimitive?.content.orEmpty()
+            val userEmail = root["user"]?.jsonObject?.get("email")?.jsonPrimitive?.content ?: email.trim()
+            if (token.isBlank()) throw SyncException("Session administrateur invalide.")
+            SupabaseAdminSession(email = userEmail, accessToken = token)
+        } catch (e: SyncException) {
+            throw e
+        } catch (e: Exception) {
+            throw SyncException(e.message ?: "Hors ligne", isOffline = true)
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    suspend fun fetchRemoteSpacesWithAdminToken(accessToken: String): List<RemoteSpaceOverview> =
+        withContext(Dispatchers.IO) {
+            if (accessToken.isBlank()) return@withContext emptyList()
+            val candidates = listOf(
+                "${BuildConfig.SUPABASE_URL}/rest/v1/rpc/bz_admin_list",
+                "${BuildConfig.SUPABASE_URL}/rest/v1/bz_spaces?select=key,name,created_at&limit=200"
+            )
+            for (endpoint in candidates) {
+                val isRpc = endpoint.contains("/rpc/")
+                val result = runCatching {
+                    val conn = (URL(endpoint).openConnection() as HttpURLConnection)
+                    try {
+                        conn.requestMethod = if (isRpc) "POST" else "GET"
+                        conn.connectTimeout = 12_000
+                        conn.readTimeout = 12_000
+                        conn.setRequestProperty("apikey", BuildConfig.SUPABASE_PUBLISHABLE_KEY)
+                        conn.setRequestProperty("Authorization", "Bearer $accessToken")
+                        if (isRpc) {
+                            conn.doOutput = true
+                            conn.setRequestProperty("Content-Type", "application/json")
+                            OutputStreamWriter(conn.outputStream, StandardCharsets.UTF_8).use { w -> w.write("{}") }
+                        }
+                        if (conn.responseCode !in 200..299) return@runCatching null
+                        val body = conn.inputStream.use {
+                            BizzlyRepository.readStreamBoundedUtf8(it, 4 * 1024 * 1024)
+                        } ?: return@runCatching null
+                        val arr = json.parseToJsonElement(body) as? JsonArray ?: return@runCatching null
+                        arr.mapNotNull { el ->
+                            val o = el as? JsonObject ?: return@mapNotNull null
+                            val key = o["key"]?.jsonPrimitive?.content
+                                ?: o["sync_key"]?.jsonPrimitive?.content
+                                ?: o["p_key"]?.jsonPrimitive?.content
+                                ?: ""
+                            val name = o["name"]?.jsonPrimitive?.content
+                                ?: o["business_name"]?.jsonPrimitive?.content
+                                ?: return@mapNotNull null
+                            val created = o["created_at"]?.jsonPrimitive?.content.orEmpty()
+                            RemoteSpaceOverview(syncKey = key, name = name, createdAt = created)
+                        }
+                    } finally {
+                        conn.disconnect()
+                    }
+                }.getOrNull()
+                if (result != null) return@withContext result
+            }
+            emptyList()
+        }
 
     suspend fun createSyncSpace(businessName: String): String {
         val key = generateSyncKey()
@@ -669,9 +791,31 @@ class SupabaseSyncClient(private val repository: BizzlyRepository) {
                 if (isDel || docEl == null || docEl is JsonNull) {
                     tbMut.remove(tableKey)
                 } else {
-                    val svId = (docEl as? JsonObject)?.get("sv")?.jsonPrimitive?.longOrNull ?: 0L
+                    val obj = docEl as? JsonObject
+                    val svId = obj?.get("sv")?.jsonPrimitive?.longOrNull ?: 0L
                     val existing = tbMut[tableKey] ?: OpenTable()
-                    tbMut[tableKey] = existing.copy(sv = svId)
+                    val compedMap = obj?.get("comped")?.let { el ->
+                        (el as? JsonObject)?.entries?.mapNotNull { (pid, v) ->
+                            val q = v.jsonPrimitive.doubleOrNull ?: return@mapNotNull null
+                            if (q > 0.0) pid to q else null
+                        }?.toMap()
+                    } ?: existing.comped
+                    val discType = obj?.get("discountType")?.jsonPrimitive?.content ?: "none"
+                    val discVal = obj?.get("discountValue")?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    val discReason = obj?.get("discountReason")?.jsonPrimitive?.content.orEmpty()
+                    val paidPartial = obj?.get("paidPartial")?.jsonPrimitive?.doubleOrNull ?: 0.0
+                    val paidCount = obj?.get("paidCount")?.jsonPrimitive?.intOrNull ?: 0
+                    val splitParts = obj?.get("splitTotalParts")?.jsonPrimitive?.intOrNull ?: 0
+                    tbMut[tableKey] = existing.copy(
+                        sv = svId,
+                        comped = compedMap,
+                        discountType = if (discType == "percent" || discType == "amount") discType else "none",
+                        discountValue = if (discType == "percent" || discType == "amount") discVal.coerceAtLeast(0.0) else 0.0,
+                        discountReason = discReason,
+                        paidPartial = paidPartial.coerceAtLeast(0.0),
+                        paidCount = paidCount.coerceIn(0, 50),
+                        splitTotalParts = splitParts.coerceIn(0, 50)
+                    )
                 }
                 state.copy(tb = tbMut)
             }

@@ -10,18 +10,19 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -36,15 +37,23 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -60,8 +69,12 @@ import com.example.bizzly.ui.components.BizzlySignatureFooter
 import com.example.bizzly.ui.components.BrandColorSwatch
 import com.example.bizzly.ui.components.BusinessAvatarBox
 import com.example.bizzly.ui.components.InitialAvatar
+import com.example.bizzly.ui.components.LegalDocumentTab
+import com.example.bizzly.ui.components.LegalDocumentsDialog
+import com.example.bizzly.ui.components.LogoThemeProposalsSection
 import com.example.bizzly.ui.components.PinDotsRow
 import com.example.bizzly.ui.components.PinNumericKeypad
+import com.example.bizzly.ui.components.bringIntoViewOnIme
 import com.example.bizzly.ui.components.rememberDecodedBitmap
 import com.example.bizzly.ui.theme.LocalBizzlyTokens
 import com.example.bizzly.ui.theme.SoraFontFamily
@@ -79,6 +92,7 @@ fun AuthFlowScreen(
     BackHandler(enabled = state.authMode != AuthMode.PICK_BUSINESS && state.accounts.isNotEmpty()) {
         when (state.authMode) {
             AuthMode.PIN_LOGIN -> viewModel.navigateAuth(AuthMode.PICK_PROFILE)
+            AuthMode.ADMIN_KLTUR -> viewModel.closeAdminPanel()
             AuthMode.PICK_PROFILE,
             AuthMode.SIGNUP,
             AuthMode.LINK_PHONE,
@@ -96,9 +110,7 @@ fun AuthFlowScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(tokens.background)
-            .statusBarsPadding()
-            .imePadding(),
+            .background(tokens.background),
         contentAlignment = Alignment.TopCenter
     ) {
         Column(
@@ -118,20 +130,26 @@ fun AuthFlowScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 BizzlyLogoLockup(isDark = state.isDarkTheme, height = 34.dp)
-                IconButton(
-                    onClick = viewModel::toggleTheme,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(tokens.card)
-                        .border(1.dp, tokens.border, RoundedCornerShape(10.dp))
-                        .testTag("auth_theme_toggle")
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = if (state.isDarkTheme) Icons.Default.LightMode else Icons.Default.DarkMode,
-                        contentDescription = "Changer de thème",
-                        tint = tokens.text
-                    )
+
+                    IconButton(
+                        onClick = viewModel::toggleTheme,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(tokens.card)
+                            .border(1.dp, tokens.border, RoundedCornerShape(10.dp))
+                            .testTag("auth_theme_toggle")
+                    ) {
+                        Icon(
+                            imageVector = if (state.isDarkTheme) Icons.Default.LightMode else Icons.Default.DarkMode,
+                            contentDescription = "Changer de thème",
+                            tint = tokens.text
+                        )
+                    }
                 }
             }
 
@@ -200,9 +218,16 @@ fun AuthFlowScreen(
                         )
                     }
                 )
+
+                AuthMode.ADMIN_KLTUR -> AdminKlturScreen(
+                    state = state,
+                    viewModel = viewModel
+                )
             }
 
-            BizzlySignatureFooter()
+            BizzlySignatureFooter(
+                onAdminClick = if (state.authMode != AuthMode.ADMIN_KLTUR) viewModel::openAdminPanel else null
+            )
         }
     }
 }
@@ -434,7 +459,9 @@ private fun SignupContent(
     viewModel: BizzlyViewModel
 ) {
     val tokens = LocalBizzlyTokens.current
+    val focusManager = LocalFocusManager.current
     val s = state.signup
+    var signupLegalTab by remember { mutableStateOf<LegalDocumentTab?>(null) }
     val logoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
@@ -507,6 +534,17 @@ private fun SignupContent(
                 }
             }
 
+            if (s.logoProposals.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(14.dp))
+                LogoThemeProposalsSection(
+                    proposals = s.logoProposals,
+                    currentBrand = s.brand,
+                    onSelectProposal = { chosen ->
+                        viewModel.updateSignup { it.copy(brand = chosen) }
+                    }
+                )
+            }
+
             Spacer(modifier = Modifier.height(12.dp))
             Text("Couleurs de l’entreprise", fontSize = 13.sp, color = tokens.muted)
             Spacer(modifier = Modifier.height(6.dp))
@@ -551,8 +589,11 @@ private fun SignupContent(
                 },
                 label = { Text("Nom de l’entreprise *") },
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                keyboardActions = KeyboardActions(onNext = { focusManager.moveFocus(FocusDirection.Down) }),
                 modifier = Modifier
                     .fillMaxWidth()
+                    .bringIntoViewOnIme()
                     .testTag("signup_name_input")
             )
             Spacer(modifier = Modifier.height(8.dp))
@@ -563,8 +604,11 @@ private fun SignupContent(
                 },
                 label = { Text("Identifiant *") },
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                keyboardActions = KeyboardActions(onNext = { focusManager.moveFocus(FocusDirection.Down) }),
                 modifier = Modifier
                     .fillMaxWidth()
+                    .bringIntoViewOnIme()
                     .testTag("signup_ident_input")
             )
             Spacer(modifier = Modifier.height(8.dp))
@@ -573,9 +617,11 @@ private fun SignupContent(
                 onValueChange = { v -> viewModel.updateSignup { it.copy(email = v) } },
                 label = { Text("E-mail *") },
                 singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next),
+                keyboardActions = KeyboardActions(onNext = { focusManager.moveFocus(FocusDirection.Down) }),
                 modifier = Modifier
                     .fillMaxWidth()
+                    .bringIntoViewOnIme()
                     .testTag("signup_email_input")
             )
             Spacer(modifier = Modifier.height(8.dp))
@@ -584,9 +630,11 @@ private fun SignupContent(
                 onValueChange = { v -> viewModel.updateSignup { it.copy(tel = v) } },
                 label = { Text("Téléphone") },
                 singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone, imeAction = ImeAction.Next),
+                keyboardActions = KeyboardActions(onNext = { focusManager.moveFocus(FocusDirection.Down) }),
                 modifier = Modifier
                     .fillMaxWidth()
+                    .bringIntoViewOnIme()
                     .testTag("signup_tel_input")
             )
             Spacer(modifier = Modifier.height(8.dp))
@@ -595,8 +643,11 @@ private fun SignupContent(
                 onValueChange = { v -> viewModel.updateSignup { it.copy(addr = v) } },
                 label = { Text("Adresse (affichée sur les factures)") },
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                keyboardActions = KeyboardActions(onNext = { focusManager.moveFocus(FocusDirection.Down) }),
                 modifier = Modifier
                     .fillMaxWidth()
+                    .bringIntoViewOnIme()
                     .testTag("signup_addr_input")
             )
         }
@@ -614,9 +665,11 @@ private fun SignupContent(
                 label = { Text("PIN du gérant *") },
                 singleLine = true,
                 visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Next),
+                keyboardActions = KeyboardActions(onNext = { focusManager.moveFocus(FocusDirection.Down) }),
                 modifier = Modifier
                     .fillMaxWidth()
+                    .bringIntoViewOnIme()
                     .testTag("signup_pin_input")
             )
             Spacer(modifier = Modifier.height(8.dp))
@@ -630,9 +683,11 @@ private fun SignupContent(
                 label = { Text("Confirmer le PIN du gérant *") },
                 singleLine = true,
                 visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Next),
+                keyboardActions = KeyboardActions(onNext = { focusManager.moveFocus(FocusDirection.Down) }),
                 modifier = Modifier
                     .fillMaxWidth()
+                    .bringIntoViewOnIme()
                     .testTag("signup_pin2_input")
             )
             Spacer(modifier = Modifier.height(8.dp))
@@ -646,9 +701,11 @@ private fun SignupContent(
                 label = { Text("PIN de la caisse (facultatif)") },
                 singleLine = true,
                 visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { focusManager.clearFocus() }),
                 modifier = Modifier
                     .fillMaxWidth()
+                    .bringIntoViewOnIme()
                     .testTag("signup_cpin_input")
             )
             Spacer(modifier = Modifier.height(8.dp))
@@ -668,6 +725,48 @@ private fun SignupContent(
                 textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth()
             )
+        }
+
+        Text(
+            text = "En créant votre espace, vous acceptez nos Conditions d’utilisation et notre Politique de confidentialité.",
+            fontSize = 12.sp,
+            color = tokens.muted,
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 6.dp)
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center
+        ) {
+            TextButton(
+                onClick = { signupLegalTab = LegalDocumentTab.PRIVACY },
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("signup_legal_privacy_btn")
+            ) {
+                Text("Confidentialité", fontSize = 12.sp, color = tokens.accentReadable)
+            }
+            TextButton(
+                onClick = { signupLegalTab = LegalDocumentTab.TERMS },
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("signup_legal_terms_btn")
+            ) {
+                Text("Conditions", fontSize = 12.sp, color = tokens.accentReadable)
+            }
+            TextButton(
+                onClick = { signupLegalTab = LegalDocumentTab.LEGAL_NOTICE },
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("signup_legal_notice_btn")
+            ) {
+                Text("Mentions légales", fontSize = 12.sp, color = tokens.accentReadable)
+            }
         }
 
         Button(
@@ -715,6 +814,13 @@ private fun SignupContent(
             Text("Restaurer depuis une sauvegarde", color = tokens.text)
         }
     }
+
+    if (signupLegalTab != null) {
+        LegalDocumentsDialog(
+            initialTab = signupLegalTab!!,
+            onDismiss = { signupLegalTab = null }
+        )
+    }
 }
 
 @Composable
@@ -754,6 +860,7 @@ private fun LinkPhoneContent(
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
                 modifier = Modifier
                     .fillMaxWidth()
+                    .bringIntoViewOnIme()
                     .testTag("link_code_input")
             )
             if (error.isNotBlank()) {

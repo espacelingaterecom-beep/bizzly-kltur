@@ -1,6 +1,8 @@
 package com.example.bizzly.util
 
 import android.content.ClipData
+import android.content.ClipDescription
+import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -14,6 +16,7 @@ import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.PersistableBundle
 import android.provider.MediaStore
 import android.util.Base64
 import androidx.core.content.FileProvider
@@ -22,6 +25,9 @@ import com.example.bizzly.domain.StockAlertLevel
 import com.example.bizzly.model.BrandColors
 import com.example.bizzly.model.BusinessAccount
 import com.example.bizzly.model.BusinessData
+import com.example.bizzly.model.OpenTable
+import com.example.bizzly.model.PaymentPart
+import com.example.bizzly.model.RestockOrderLine
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.qrcode.QRCodeWriter
@@ -46,7 +52,8 @@ data class DecodedLogoResult(
     val dataUri: String,
     val width: Int,
     val height: Int,
-    val palette: BrandColors?
+    val palette: BrandColors?,
+    val proposals: List<com.example.bizzly.model.BrandThemeProposal> = emptyList()
 )
 
 data class PreparedExport(
@@ -70,8 +77,21 @@ object ExportUtils {
     }
 
     fun decodeAndResizeLogo(context: Context, uri: Uri): DecodedLogoResult? {
+        val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use { stream ->
+            BitmapFactory.decodeStream(stream, null, boundsOpts)
+        }
+        val origW = boundsOpts.outWidth
+        val origH = boundsOpts.outHeight
+        if (origW <= 0 || origH <= 0) return null
+
+        var sampleSize = 1
+        while ((origW / sampleSize) > 1040 || (origH / sampleSize) > 1040) {
+            sampleSize *= 2
+        }
+        val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
         val rawBitmap = context.contentResolver.openInputStream(uri)?.use { stream ->
-            BitmapFactory.decodeStream(stream)
+            BitmapFactory.decodeStream(stream, null, decodeOpts)
         } ?: return null
 
         val iw = max(1, rawBitmap.width)
@@ -86,7 +106,8 @@ object ExportUtils {
             rawBitmap
         }
 
-        val palette = BizzlyCalculator.extractBrandPalette(resized)
+        val proposals = BizzlyCalculator.extractBrandThemeProposals(resized)
+        val palette = proposals.firstOrNull()?.brand
         val baos = ByteArrayOutputStream()
         resized.compress(Bitmap.CompressFormat.PNG, 100, baos)
         resized.recycle()
@@ -96,7 +117,8 @@ object ExportUtils {
             dataUri = "data:image/png;base64,$b64",
             width = w,
             height = h,
-            palette = palette
+            palette = palette,
+            proposals = proposals
         )
     }
 
@@ -153,15 +175,20 @@ object ExportUtils {
         data: BusinessData,
         tableNumber: Int,
         paymentMode: String,
-        cashGiven: Double
+        cashGiven: Double,
+        payments: List<PaymentPart> = emptyList(),
+        isProforma: Boolean = false
     ): ByteArray {
-        val table = data.tb[tableNumber.toString()]
-        val items = table?.it.orEmpty().entries.mapNotNull { (pidStr, qty) ->
+        val table = data.tb[tableNumber.toString()] ?: OpenTable()
+        val breakdown = BizzlyCalculator.calculateTableBreakdown(data, table)
+        val items = table.it.entries.mapNotNull { (pidStr, qty) ->
             val product = BizzlyCalculator.productByIdStr(data, pidStr) ?: return@mapNotNull null
-            Triple(product.n, qty, qty * product.pv)
+            val compQty = (table.comped[pidStr] ?: 0.0).coerceIn(0.0, qty)
+            val paidQty = (qty - compQty).coerceAtLeast(0.0)
+            Triple(product.n, qty to compQty, paidQty * product.pv)
         }
-        val total = BizzlyCalculator.tableTotal(data, tableNumber)
-        val serverName = table?.let { BizzlyCalculator.serverName(data, it.sv) } ?: "Serveur"
+        val total = breakdown.remainingDue
+        val serverName = BizzlyCalculator.serverName(data, table.sv)
         val nowStr = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm", Locale.FRANCE))
         val logoBmp = decodeDataUriBitmap(account?.logo)
         val linesInfo = buildList {
@@ -169,9 +196,16 @@ object ExportUtils {
             if (!account?.tel.isNullOrBlank()) add("Tél : ${account!!.tel}")
         }
 
+        val extraLines = (if (breakdown.compedDiscount > 0) 1 else 0) +
+            (if (breakdown.tableDiscount > 0) 1 else 0) +
+            (if (table.discountReason.isNotBlank()) 1 else 0) +
+            (if (breakdown.paidSoFar > 0) 2 else 0) +
+            (if (payments.size > 1) payments.size else 0) +
+            items.count { it.second.second > 0.0 }
+
         val pageWidth = 226
         val headHeight = (if (logoBmp != null) 46 else 22) + linesInfo.size * 12
-        val pageHeight = max(240, 180 + headHeight + items.size * 16 + if (cashGiven > 0) 42 else 0)
+        val pageHeight = max(260, 195 + headHeight + items.size * 16 + extraLines * 14 + if (cashGiven > 0) 42 else 0)
 
         val doc = PdfDocument()
         try {
@@ -228,12 +262,14 @@ object ExportUtils {
 
             y += 8f
             mutedPaint.textAlign = Paint.Align.LEFT
-            canvas.drawText("FACTURE - Table $tableNumber", 14f, y, boldPaint)
+            val docTitle = if (isProforma) "NOTE DE TABLE - Table $tableNumber" else "FACTURE - Table $tableNumber"
+            canvas.drawText(docTitle, 14f, y, boldPaint)
             y += 12f
             canvas.drawText(ellipsizeToWidth("$serverName · $nowStr", mutedPaint, pageWidth - 28f), 14f, y, mutedPaint)
             y += 16f
 
-            items.forEach { (name, qty, amt) ->
+            items.forEach { (name, qtys, amt) ->
+                val (qty, compQty) = qtys
                 val priceStr = BizzlyCalculator.formatFcfa(amt)
                 val priceW = textPaint.measureText(priceStr)
                 val maxLabelW = (pageWidth - 28f) - priceW - 6f
@@ -242,38 +278,106 @@ object ExportUtils {
                 canvas.drawText(label, 14f, y, textPaint)
                 textPaint.textAlign = Paint.Align.RIGHT
                 canvas.drawText(priceStr, pageWidth - 14f, y, textPaint)
-                y += 15f
+                y += 14f
+                if (compQty > 0.0) {
+                    mutedPaint.textAlign = Paint.Align.LEFT
+                    canvas.drawText("   dont ${BizzlyCalculator.formatQty(compQty)} offert(s)", 14f, y, mutedPaint)
+                    y += 12f
+                }
+            }
+
+            if (breakdown.compedDiscount > 0.0 || breakdown.tableDiscount > 0.0) {
+                canvas.drawLine(14f, y - 3f, pageWidth - 14f, y - 3f, linePaint)
+                y += 11f
+                textPaint.textAlign = Paint.Align.LEFT
+                canvas.drawText("Sous-total brut", 14f, y, textPaint)
+                textPaint.textAlign = Paint.Align.RIGHT
+                canvas.drawText(BizzlyCalculator.formatFcfa(breakdown.grossSubtotal), pageWidth - 14f, y, textPaint)
+                y += 13f
+                if (breakdown.compedDiscount > 0.0) {
+                    textPaint.textAlign = Paint.Align.LEFT
+                    canvas.drawText("Offerts", 14f, y, textPaint)
+                    textPaint.textAlign = Paint.Align.RIGHT
+                    canvas.drawText("-${BizzlyCalculator.formatFcfa(breakdown.compedDiscount)}", pageWidth - 14f, y, textPaint)
+                    y += 13f
+                }
+                if (breakdown.tableDiscount > 0.0) {
+                    val discLbl = if (table.discountType == "percent") {
+                        "Remise (${BizzlyCalculator.formatQty(table.discountValue)}%)"
+                    } else "Remise"
+                    textPaint.textAlign = Paint.Align.LEFT
+                    canvas.drawText(discLbl, 14f, y, textPaint)
+                    textPaint.textAlign = Paint.Align.RIGHT
+                    canvas.drawText("-${BizzlyCalculator.formatFcfa(breakdown.tableDiscount)}", pageWidth - 14f, y, textPaint)
+                    y += 13f
+                }
+                if (table.discountReason.isNotBlank()) {
+                    mutedPaint.textAlign = Paint.Align.LEFT
+                    canvas.drawText(ellipsizeToWidth("Motif : ${table.discountReason}", mutedPaint, pageWidth - 28f), 14f, y, mutedPaint)
+                    y += 12f
+                }
+            }
+
+            if (breakdown.paidSoFar > 0.0) {
+                textPaint.textAlign = Paint.Align.LEFT
+                canvas.drawText("Total net", 14f, y, textPaint)
+                textPaint.textAlign = Paint.Align.RIGHT
+                canvas.drawText(BizzlyCalculator.formatFcfa(breakdown.netTotal), pageWidth - 14f, y, textPaint)
+                y += 13f
+                textPaint.textAlign = Paint.Align.LEFT
+                canvas.drawText("Déjà réglé", 14f, y, textPaint)
+                textPaint.textAlign = Paint.Align.RIGHT
+                canvas.drawText("-${BizzlyCalculator.formatFcfa(breakdown.paidSoFar)}", pageWidth - 14f, y, textPaint)
+                y += 13f
             }
 
             canvas.drawLine(14f, y - 4f, pageWidth - 14f, y - 4f, linePaint)
             y += 12f
             boldPaint.textSize = 11.5f
             boldPaint.textAlign = Paint.Align.LEFT
-            canvas.drawText("TOTAL", 14f, y, boldPaint)
+            canvas.drawText(if (isProforma) "À PAYER" else "TOTAL", 14f, y, boldPaint)
             boldPaint.textAlign = Paint.Align.RIGHT
             canvas.drawText(BizzlyCalculator.formatFcfa(total), pageWidth - 14f, y, boldPaint)
             y += 18f
 
-            textPaint.textAlign = Paint.Align.LEFT
-            textPaint.textSize = 9.5f
-            canvas.drawText("Paiement : $paymentMode", 14f, y, textPaint)
-            if (cashGiven > 0.0) {
-                y += 16f
-                canvas.drawText("Donné : ${BizzlyCalculator.formatFcfa(cashGiven)}", 14f, y, textPaint)
-                y += 13f
-                boldPaint.textSize = 9.5f
-                boldPaint.textAlign = Paint.Align.LEFT
-                canvas.drawText(
-                    "Rendu : ${BizzlyCalculator.formatFcfa(max(0.0, cashGiven - total))}",
-                    14f,
-                    y,
-                    boldPaint
-                )
-            }
+            if (isProforma) {
+                mutedPaint.textAlign = Paint.Align.CENTER
+                canvas.drawText("Note provisoire — non encaissée", pageWidth / 2f, y, mutedPaint)
+            } else {
+                textPaint.textAlign = Paint.Align.LEFT
+                textPaint.textSize = 9.5f
+                if (payments.size > 1) {
+                    canvas.drawText("Paiement mixte :", 14f, y, textPaint)
+                    y += 13f
+                    payments.forEach { part ->
+                        textPaint.textAlign = Paint.Align.LEFT
+                        canvas.drawText("  ${part.mode}", 14f, y, textPaint)
+                        textPaint.textAlign = Paint.Align.RIGHT
+                        canvas.drawText(BizzlyCalculator.formatFcfa(part.amount), pageWidth - 14f, y, textPaint)
+                        y += 13f
+                    }
+                } else {
+                    canvas.drawText("Paiement : $paymentMode", 14f, y, textPaint)
+                }
+                if (cashGiven > 0.0) {
+                    y += 16f
+                    textPaint.textAlign = Paint.Align.LEFT
+                    canvas.drawText("Donné : ${BizzlyCalculator.formatFcfa(cashGiven)}", 14f, y, textPaint)
+                    y += 13f
+                    boldPaint.textSize = 9.5f
+                    boldPaint.textAlign = Paint.Align.LEFT
+                    canvas.drawText(
+                        "Rendu : ${BizzlyCalculator.formatFcfa(max(0.0, cashGiven - total))}",
+                        14f,
+                        y,
+                        boldPaint
+                    )
+                }
 
-            y += 24f
-            textPaint.textAlign = Paint.Align.CENTER
-            canvas.drawText("Merci de votre visite !", pageWidth / 2f, y, textPaint)
+                y += 24f
+                textPaint.textAlign = Paint.Align.CENTER
+                canvas.drawText("Merci de votre visite !", pageWidth / 2f, y, textPaint)
+            }
 
             doc.finishPage(page)
             val out = ByteArrayOutputStream()
@@ -808,6 +912,200 @@ object ExportUtils {
         return buildXlsxZip(sheets)
     }
 
+    fun generateRestockOrderPdf(
+        account: BusinessAccount?,
+        supplierName: String,
+        lines: List<RestockOrderLine>
+    ): ByteArray {
+        val pageW = 595
+        val pageH = 842
+        val brand = account?.brand ?: BrandColors()
+        val prRgb = BizzlyCalculator.hexToRgb(brand.pr)
+        val prSafe = BizzlyCalculator.fitToContrast(prRgb, Triple(255, 255, 255), 3.0)
+        val prColor = Color.rgb(prSafe.first, prSafe.second, prSafe.third)
+        val navy = Color.parseColor("#0A1F44")
+        val slate = Color.parseColor("#64748B")
+        val border = Color.parseColor("#E2E8F0")
+        val cardBg = Color.parseColor("#F8FAFC")
+        val red = Color.parseColor("#E5484D")
+        val warn = Color.parseColor("#D97706")
+        val nowStr = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm", Locale.FRANCE))
+        val logoBmp = decodeDataUriBitmap(account?.logo)
+
+        val totalQty = lines.sumOf { it.suggestedQty }
+        val estimatedTotal = lines.sumOf { it.suggestedQty * it.unitPrice }
+
+        val doc = PdfDocument()
+        try {
+            var pageNum = 1
+            var page = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, pageNum).create())
+            var c = page.canvas
+            c.drawColor(Color.WHITE)
+
+            val p = Paint(Paint.ANTI_ALIAS_FLAG)
+            fun newPageIfNeeded(y: Float, needed: Float): Float {
+                if (y + needed <= pageH - 52f) return y
+                p.color = slate
+                p.typeface = Typeface.DEFAULT
+                p.textSize = 8.5f
+                p.textAlign = Paint.Align.LEFT
+                c.drawText("Bizzly · Bon de commande · page $pageNum", 40f, pageH - 26f, p)
+                doc.finishPage(page)
+                pageNum++
+                page = doc.startPage(PdfDocument.PageInfo.Builder(pageW, pageH, pageNum).create())
+                c = page.canvas
+                c.drawColor(Color.WHITE)
+                return 48f
+            }
+
+            if (logoBmp != null) {
+                val rawW = (account?.lw?.takeIf { it > 0 } ?: max(1, logoBmp.width)).toFloat()
+                val rawH = (account?.lh?.takeIf { it > 0 } ?: max(1, logoBmp.height)).toFloat()
+                val ratio = (rawW / rawH).coerceIn(0.25f, 4.5f)
+                val w = min(120f, 34f * ratio)
+                val h = w / ratio
+                c.drawBitmap(logoBmp, null, RectF(40f, 54f - h / 2f, 40f + w, 54f + h / 2f), null)
+            } else {
+                p.color = navy
+                p.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                p.textSize = 18f
+                p.textAlign = Paint.Align.LEFT
+                c.drawText(ellipsizeToWidth(account?.name ?: "Bizzly", p, 300f), 40f, 56f, p)
+            }
+
+            p.color = prColor
+            p.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            p.textSize = 13.5f
+            p.textAlign = Paint.Align.RIGHT
+            c.drawText("BON DE COMMANDE FOURNISSEUR", 555f, 50f, p)
+            p.color = slate
+            p.typeface = Typeface.DEFAULT
+            p.textSize = 9.5f
+            c.drawText("Édité le $nowStr", 555f, 66f, p)
+
+            p.color = border
+            c.drawRect(40f, 82f, 555f, 83.2f, p)
+
+            var y = 104f
+            p.color = cardBg
+            c.drawRoundRect(RectF(40f, y, 555f, y + 66f), 10f, 10f, p)
+            p.color = slate
+            p.textAlign = Paint.Align.LEFT
+            p.textSize = 10f
+            c.drawText("Fournisseur : ${supplierName.ifBlank { "Fournisseur général" }}", 54f, y + 24f, p)
+            c.drawText("Articles à réapprovisionner : ${lines.size}  ·  Unités totales : ${BizzlyCalculator.formatQty(totalQty)}", 54f, y + 44f, p)
+            if (estimatedTotal > 0.0) {
+                p.color = navy
+                p.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                p.textAlign = Paint.Align.RIGHT
+                c.drawText("Valeur est. : ${BizzlyCalculator.formatFcfa(estimatedTotal)}", 541f, y + 44f, p)
+            }
+            y += 84f
+
+            // Table header
+            p.color = prColor
+            c.drawRoundRect(RectF(40f, y, 555f, y + 24f), 6f, 6f, p)
+            p.color = Color.WHITE
+            p.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            p.textSize = 9.5f
+            p.textAlign = Paint.Align.LEFT
+            c.drawText("Article", 48f, y + 16f, p)
+            p.textAlign = Paint.Align.RIGHT
+            c.drawText("Stock", 335f, y + 16f, p)
+            c.drawText("Seuil", 395f, y + 16f, p)
+            c.drawText("À commander", 475f, y + 16f, p)
+            c.drawText("Est. F", 547f, y + 16f, p)
+            y += 32f
+
+            lines.forEach { line ->
+                y = newPageIfNeeded(y, 26f)
+                p.color = navy
+                p.typeface = Typeface.DEFAULT
+                p.textSize = 10f
+                p.textAlign = Paint.Align.LEFT
+                val title = if (line.sku.isNotBlank()) "${line.name} (${line.sku})" else line.name
+                c.drawText(ellipsizeToWidth(title, p, 235f), 46f, y, p)
+
+                p.color = if (line.currentQty <= 0.0) red else warn
+                p.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                p.textAlign = Paint.Align.RIGHT
+                c.drawText(BizzlyCalculator.formatQty(line.currentQty), 335f, y, p)
+
+                p.color = slate
+                p.typeface = Typeface.DEFAULT
+                c.drawText(BizzlyCalculator.formatQty(line.minThreshold), 395f, y, p)
+
+                p.color = prColor
+                p.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                c.drawText("${BizzlyCalculator.formatQty(line.suggestedQty)} ${line.unit}", 475f, y, p)
+
+                p.color = navy
+                p.typeface = Typeface.DEFAULT
+                val lineEst = line.suggestedQty * line.unitPrice
+                c.drawText(if (lineEst > 0.0) BizzlyCalculator.formatFcfa(lineEst) else "-", 547f, y, p)
+
+                p.color = border
+                c.drawRect(40f, y + 7f, 555f, y + 7.7f, p)
+                y += 24f
+            }
+
+            p.color = slate
+            p.typeface = Typeface.DEFAULT
+            p.textSize = 8.5f
+            p.textAlign = Paint.Align.LEFT
+            c.drawText("Bizzly · Fait par KLTUR COORPORATION · page $pageNum", 40f, pageH - 26f, p)
+
+            doc.finishPage(page)
+            val out = ByteArrayOutputStream()
+            doc.writeTo(out)
+            return out.toByteArray()
+        } finally {
+            doc.close()
+            logoBmp?.recycle()
+        }
+    }
+
+    fun generateRestockOrderExcel(
+        account: BusinessAccount?,
+        supplierName: String,
+        lines: List<RestockOrderLine>
+    ): ByteArray {
+        val orderRows = mutableListOf<List<Any>>(
+            listOf("Article", "SKU", "Catégorie", "Unité", "Stock actuel", "Seuil minimal", "Objectif (2x seuil)", "Qté à commander", "Prix unitaire", "Montant estimé")
+        )
+        lines.forEach { line ->
+            orderRows += listOf(
+                line.name,
+                line.sku,
+                line.category,
+                line.unit,
+                line.currentQty,
+                line.minThreshold,
+                line.minThreshold * 2.0,
+                line.suggestedQty,
+                line.unitPrice,
+                line.suggestedQty * line.unitPrice
+            )
+        }
+
+        val summaryRows = listOf(
+            listOf("Champ", "Valeur"),
+            listOf("Entreprise", account?.name ?: "Bizzly"),
+            listOf("Fournisseur", supplierName.ifBlank { "Fournisseur général" }),
+            listOf("Date d'édition", LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm", Locale.FRANCE))),
+            listOf("Nombre d'articles", lines.size),
+            listOf("Unités à commander", lines.sumOf { it.suggestedQty }),
+            listOf("Valeur totale estimée", lines.sumOf { it.suggestedQty * it.unitPrice })
+        )
+
+        return buildXlsxZip(
+            listOf(
+                "Bon de commande" to orderRows,
+                "Résumé" to summaryRows
+            )
+        )
+    }
+
     private fun buildXlsxZip(sheets: List<Pair<String, List<List<Any>>>>): ByteArray {
         val xmlHeader = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n"
         val mainNs = "xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\""
@@ -917,7 +1215,7 @@ object ExportUtils {
                                 "<c r=\"$ref\"$styleAttr><v>$numStr</v></c>"
                             }
                             else -> {
-                                val s = v.toString()
+                                val s = sanitizeSpreadsheetCell(v.toString())
                                 if (s.isEmpty()) "" else "<c r=\"$ref\" t=\"inlineStr\"$styleAttr><is><t xml:space=\"preserve\">${xesc(s)}</t></is></c>"
                             }
                         }
@@ -932,6 +1230,19 @@ object ExportUtils {
             }
         }
         return out.toByteArray()
+    }
+
+    fun sanitizeSpreadsheetCell(raw: String): String {
+        if (raw.isEmpty()) return raw
+        val first = raw[0]
+        val trimmedFirst = raw.trimStart().firstOrNull()
+        return if (first == '=' || first == '+' || first == '-' || first == '@' || first == '\t' || first == '\r' ||
+            trimmedFirst == '=' || trimmedFirst == '+' || trimmedFirst == '@'
+        ) {
+            "'$raw"
+        } else {
+            raw
+        }
     }
 
     fun sanitizeFilename(raw: String): String =
@@ -1070,5 +1381,17 @@ object ExportUtils {
             context.startActivity(chooser)
             true
         }.getOrDefault(false)
+    }
+
+    fun copySensitiveToClipboard(context: Context, label: String, text: String) {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        val clip = ClipData.newPlainText(label, text).apply {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                description.extras = PersistableBundle().apply {
+                    putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true)
+                }
+            }
+        }
+        cm.setPrimaryClip(clip)
     }
 }

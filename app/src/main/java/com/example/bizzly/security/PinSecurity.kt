@@ -82,6 +82,26 @@ object PinSecurity {
         return salt to hash
     }
 
+    private const val ADMIN_INSTALL_SALT = "7pifhkdln5fh3zyrpj"
+    private const val ADMIN_INSTALL_HASH = "7b43fcd24be4f8534bad5dc94d94a32ad82f2811dd9a42bc9b65724554e744f5"
+
+    fun createCredentialHash(secret: String): Pair<String, String> = createPinHash(secret)
+
+    fun verifyCredential(salt: String, hash: String, secret: String): Boolean {
+        if (hash.isBlank() || salt.isBlank() || secret.isEmpty()) return false
+        val computed = hashPin(salt, secret, 2)
+        return MessageDigest.isEqual(
+            computed.toByteArray(StandardCharsets.UTF_8),
+            hash.toByteArray(StandardCharsets.UTF_8)
+        )
+    }
+
+    fun verifyAdminInstallCode(installCode: String): Boolean {
+        val clean = installCode.trim().uppercase()
+        if (clean.isEmpty()) return false
+        return verifyCredential(ADMIN_INSTALL_SALT, ADMIN_INSTALL_HASH, clean)
+    }
+
     fun findProfileWithSamePin(
         account: BusinessAccount,
         pin: String,

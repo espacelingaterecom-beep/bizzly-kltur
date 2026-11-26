@@ -24,8 +24,14 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CallSplit
+import androidx.compose.material.icons.filled.LocalOffer
 import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.Print
+import androidx.compose.material.icons.filled.ReceiptLong
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.RestaurantMenu
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
@@ -63,6 +69,7 @@ import com.example.bizzly.ui.components.BizzlyCard
 import com.example.bizzly.ui.components.BizzlyHeroHeader
 import com.example.bizzly.ui.components.BizzlySignatureFooter
 import com.example.bizzly.ui.components.BusinessAvatarBox
+import com.example.bizzly.ui.components.bringIntoViewOnIme
 import com.example.bizzly.ui.theme.LocalBizzlyTokens
 import com.example.bizzly.ui.theme.SoraFontFamily
 import com.example.bizzly.ui.viewmodel.BizzlyUiState
@@ -195,7 +202,8 @@ private fun TableDetailScreen(
     val tokens = LocalBizzlyTokens.current
     val data = state.businessData
     val tbl = data.tb[tableNumber.toString()] ?: OpenTable(sv = data.srv.firstOrNull()?.id ?: 0L)
-    val total = BizzlyCalculator.tableTotal(data, tableNumber)
+    val breakdown = BizzlyCalculator.calculateTableBreakdown(data, tbl)
+    val total = breakdown.remainingDue
     val favorites = remember(data.prod, data.sv, data.arch) {
         BizzlyCalculator.favoriteProducts(data, 6)
     }
@@ -203,6 +211,9 @@ private fun TableDetailScreen(
     var productPickerExpanded by remember { mutableStateOf(false) }
     var serverPickerExpanded by remember { mutableStateOf(false) }
     var selectedAddPid by remember(data.prod) { mutableStateOf(data.prod.firstOrNull()?.id) }
+    var discountDialogOpen by remember { mutableStateOf(false) }
+    var splitDialogOpen by remember { mutableStateOf(false) }
+    var printerDialogOpen by remember { mutableStateOf(false) }
 
     BackHandler {
         viewModel.closeTableDetail()
@@ -220,6 +231,7 @@ private fun TableDetailScreen(
         ) {
             OutlinedButton(
                 onClick = viewModel::closeTableDetail,
+                border = BorderStroke(1.dp, tokens.headerControlBorder),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp)
@@ -228,11 +240,11 @@ private fun TableDetailScreen(
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                     contentDescription = "Retour aux tables",
-                    tint = tokens.text,
+                    tint = tokens.onHeader,
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Toutes les tables", color = tokens.text)
+                Text("Toutes les tables", color = tokens.onHeader)
             }
         }
 
@@ -416,6 +428,8 @@ private fun TableDetailScreen(
                     entries.forEachIndexed { idx, (pidStr, qty) ->
                         val prod = BizzlyCalculator.productByIdStr(data, pidStr)
                         if (prod != null) {
+                            val compQ = (tbl.comped[pidStr] ?: 0.0).coerceIn(0.0, qty)
+                            val paidQ = (qty - compQ).coerceAtLeast(0.0)
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -425,9 +439,10 @@ private fun TableDetailScreen(
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(prod.n, fontWeight = FontWeight.SemiBold, color = tokens.text)
                                     Text(
-                                        text = BizzlyCalculator.formatFcfa(qty * prod.pv),
+                                        text = BizzlyCalculator.formatFcfa(paidQ * prod.pv) +
+                                            if (compQ > 0.0) " · dont ${BizzlyCalculator.formatQty(compQ)} offert(s)" else "",
                                         fontSize = 12.5.sp,
-                                        color = tokens.muted
+                                        color = if (compQ > 0.0) tokens.warn else tokens.muted
                                     )
                                 }
                                 IconButton(
@@ -464,11 +479,57 @@ private fun TableDetailScreen(
                         }
                     }
                     HorizontalDivider(color = tokens.border, modifier = Modifier.padding(vertical = 8.dp))
+                    if (breakdown.compedDiscount > 0.0 || breakdown.tableDiscount > 0.0 || breakdown.paidSoFar > 0.0) {
+                        Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("Sous-total brut", fontSize = 12.5.sp, color = tokens.muted)
+                                Text(BizzlyCalculator.formatFcfa(breakdown.grossSubtotal), fontSize = 12.5.sp, color = tokens.text)
+                            }
+                            if (breakdown.compedDiscount > 0.0) {
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text("Produits offerts", fontSize = 12.5.sp, color = tokens.warn)
+                                    Text("-${BizzlyCalculator.formatFcfa(breakdown.compedDiscount)}", fontSize = 12.5.sp, color = tokens.warn)
+                                }
+                            }
+                            if (breakdown.tableDiscount > 0.0) {
+                                val discLabel = if (tbl.discountType == "percent") {
+                                    "Remise (${BizzlyCalculator.formatQty(tbl.discountValue)}%)"
+                                } else {
+                                    "Remise"
+                                }
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text(discLabel, fontSize = 12.5.sp, color = tokens.warn)
+                                    Text("-${BizzlyCalculator.formatFcfa(breakdown.tableDiscount)}", fontSize = 12.5.sp, color = tokens.warn)
+                                }
+                            }
+                            if (tbl.discountReason.isNotBlank()) {
+                                Text(
+                                    text = "Motif : ${tbl.discountReason}",
+                                    fontSize = 12.sp,
+                                    color = tokens.muted
+                                )
+                            }
+                            if (breakdown.paidSoFar > 0.0) {
+                                val partLabel = if (tbl.splitTotalParts > 0) {
+                                    " (${tbl.paidCount}/${tbl.splitTotalParts} parts)"
+                                } else ""
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text("Déjà encaissé$partLabel", fontSize = 12.5.sp, color = tokens.ok, fontWeight = FontWeight.SemiBold)
+                                    Text("-${BizzlyCalculator.formatFcfa(breakdown.paidSoFar)}", fontSize = 12.5.sp, color = tokens.ok, fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Text("Total table", fontWeight = FontWeight.Bold, color = tokens.text)
+                        Text(
+                            text = if (breakdown.paidSoFar > 0.0) "Reste à payer" else "Total table",
+                            fontWeight = FontWeight.Bold,
+                            color = tokens.text
+                        )
                         Text(
                             text = BizzlyCalculator.formatFcfa(total),
                             fontFamily = SoraFontFamily,
@@ -476,6 +537,34 @@ private fun TableDetailScreen(
                             fontSize = 18.sp,
                             color = tokens.accentReadable
                         )
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { discountDialogOpen = true },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("table_discount_btn")
+                        ) {
+                            Icon(Icons.Default.LocalOffer, contentDescription = null, tint = tokens.accentReadable, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Remise / Offert", color = tokens.text, fontSize = 12.5.sp, maxLines = 1)
+                        }
+                        OutlinedButton(
+                            onClick = { splitDialogOpen = true },
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("table_split_btn")
+                        ) {
+                            Icon(Icons.Default.CallSplit, contentDescription = null, tint = tokens.accentReadable, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Partager", color = tokens.text, fontSize = 12.5.sp, maxLines = 1)
+                        }
                     }
                 }
 
@@ -513,7 +602,20 @@ private fun TableDetailScreen(
                         }
                     }
 
-                    if (state.paymentMode == "Espèces") {
+                    if (state.paymentMode == "Mixte") {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        MixedPaymentEditor(
+                            totalDue = total,
+                            mode1 = state.mixedMode1,
+                            amount1Text = state.mixedAmount1Text,
+                            mode2 = state.mixedMode2,
+                            onMode1Change = viewModel::setMixedMode1,
+                            onAmount1Change = viewModel::setMixedAmount1,
+                            onMode2Change = viewModel::setMixedMode2,
+                            cashGivenText = state.cashGivenText,
+                            onCashGivenChange = viewModel::setCashGiven
+                        )
+                    } else if (state.paymentMode == "Espèces") {
                         Spacer(modifier = Modifier.height(12.dp))
                         OutlinedTextField(
                             value = state.cashGivenText,
@@ -523,6 +625,7 @@ private fun TableDetailScreen(
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .bringIntoViewOnIme()
                                 .testTag("cash_given_input")
                         )
                         Spacer(modifier = Modifier.height(8.dp))
@@ -582,7 +685,14 @@ private fun TableDetailScreen(
                 val paperBg = Color(0xFFF8FAFC)
                 val paperInk = Color(0xFF0A1F44)
                 val acc = state.activeAccount
-                val givenVal = if (state.paymentMode == "Espèces") state.cashGivenText.toDoubleOrNull() ?: 0.0 else 0.0
+                val amt1Mix = if (state.paymentMode == "Mixte") state.mixedAmount1Text.toDoubleOrNull()?.coerceIn(0.0, total) ?: 0.0 else 0.0
+                val cashLegDue = when (state.paymentMode) {
+                    "Espèces" -> total
+                    "Mixte" -> (if (state.mixedMode1 == "Espèces") amt1Mix else 0.0) +
+                        (if (state.mixedMode2 == "Espèces") (total - amt1Mix).coerceAtLeast(0.0) else 0.0)
+                    else -> 0.0
+                }
+                val givenVal = if (cashLegDue > 0.0) state.cashGivenText.toDoubleOrNull() ?: 0.0 else 0.0
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -620,9 +730,42 @@ private fun TableDetailScreen(
                     HorizontalDivider(color = Color(0xFF94A3B8), modifier = Modifier.padding(vertical = 4.dp))
                     tbl.it.forEach { (pidStr, q) ->
                         val p = BizzlyCalculator.productByIdStr(data, pidStr) ?: return@forEach
+                        val compQ = (tbl.comped[pidStr] ?: 0.0).coerceIn(0.0, q)
+                        val paidQ = (q - compQ).coerceAtLeast(0.0)
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text("${BizzlyCalculator.formatQty(q)} x ${p.n}", fontFamily = FontFamily.Monospace, color = paperInk, fontSize = 12.5.sp)
-                            Text(BizzlyCalculator.formatFcfa(q * p.pv), fontFamily = FontFamily.Monospace, color = paperInk, fontSize = 12.5.sp)
+                            Text(BizzlyCalculator.formatFcfa(paidQ * p.pv), fontFamily = FontFamily.Monospace, color = paperInk, fontSize = 12.5.sp)
+                        }
+                        if (compQ > 0.0) {
+                            Text("  dont ${BizzlyCalculator.formatQty(compQ)} offert(s)", fontFamily = FontFamily.Monospace, color = Color(0xFF64748B), fontSize = 11.sp)
+                        }
+                    }
+                    if (breakdown.compedDiscount > 0.0 || breakdown.tableDiscount > 0.0 || breakdown.paidSoFar > 0.0) {
+                        HorizontalDivider(color = Color(0xFF94A3B8), modifier = Modifier.padding(vertical = 4.dp))
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            Text("Sous-total brut", fontFamily = FontFamily.Monospace, color = paperInk, fontSize = 12.sp)
+                            Text(BizzlyCalculator.formatFcfa(breakdown.grossSubtotal), fontFamily = FontFamily.Monospace, color = paperInk, fontSize = 12.sp)
+                        }
+                        if (breakdown.compedDiscount > 0.0) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("Offerts", fontFamily = FontFamily.Monospace, color = paperInk, fontSize = 12.sp)
+                                Text("-${BizzlyCalculator.formatFcfa(breakdown.compedDiscount)}", fontFamily = FontFamily.Monospace, color = paperInk, fontSize = 12.sp)
+                            }
+                        }
+                        if (breakdown.tableDiscount > 0.0) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("Remise", fontFamily = FontFamily.Monospace, color = paperInk, fontSize = 12.sp)
+                                Text("-${BizzlyCalculator.formatFcfa(breakdown.tableDiscount)}", fontFamily = FontFamily.Monospace, color = paperInk, fontSize = 12.sp)
+                            }
+                        }
+                        if (tbl.discountReason.isNotBlank()) {
+                            Text("Motif : ${tbl.discountReason}", fontFamily = FontFamily.Monospace, color = Color(0xFF64748B), fontSize = 11.sp)
+                        }
+                        if (breakdown.paidSoFar > 0.0) {
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("Déjà réglé", fontFamily = FontFamily.Monospace, color = paperInk, fontSize = 12.sp)
+                                Text("-${BizzlyCalculator.formatFcfa(breakdown.paidSoFar)}", fontFamily = FontFamily.Monospace, color = paperInk, fontSize = 12.sp)
+                            }
                         }
                     }
                     HorizontalDivider(color = Color(0xFF94A3B8), modifier = Modifier.padding(vertical = 4.dp))
@@ -630,15 +773,24 @@ private fun TableDetailScreen(
                         Text("TOTAL", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, color = paperInk, fontSize = 14.sp)
                         Text(BizzlyCalculator.formatFcfa(total), fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, color = paperInk, fontSize = 14.sp)
                     }
-                    Text("Paiement : ${state.paymentMode}", fontFamily = FontFamily.Monospace, color = paperInk, fontSize = 12.sp)
-                    if (givenVal > 0.0) {
+                    if (state.paymentMode == "Mixte" && amt1Mix > 0.0 && amt1Mix < total) {
+                        Text(
+                            text = "Paiement : ${state.mixedMode1} (${BizzlyCalculator.formatFcfa(amt1Mix)}) + ${state.mixedMode2} (${BizzlyCalculator.formatFcfa(total - amt1Mix)})",
+                            fontFamily = FontFamily.Monospace,
+                            color = paperInk,
+                            fontSize = 11.5.sp
+                        )
+                    } else {
+                        Text("Paiement : ${state.paymentMode}", fontFamily = FontFamily.Monospace, color = paperInk, fontSize = 12.sp)
+                    }
+                    if (givenVal > 0.0 && cashLegDue > 0.0) {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text("Donné", fontFamily = FontFamily.Monospace, color = paperInk, fontSize = 12.sp)
                             Text(BizzlyCalculator.formatFcfa(givenVal), fontFamily = FontFamily.Monospace, color = paperInk, fontSize = 12.sp)
                         }
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(if (givenVal >= total) "RENDU" else "IL MANQUE", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, color = paperInk, fontSize = 12.5.sp)
-                            Text(BizzlyCalculator.formatFcfa(abs(givenVal - total)), fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, color = paperInk, fontSize = 12.5.sp)
+                            Text(if (givenVal >= cashLegDue) "RENDU" else "IL MANQUE", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, color = paperInk, fontSize = 12.5.sp)
+                            Text(BizzlyCalculator.formatFcfa(abs(givenVal - cashLegDue)), fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, color = paperInk, fontSize = 12.5.sp)
                         }
                     }
                 }
@@ -658,16 +810,111 @@ private fun TableDetailScreen(
                     Text("Encaisser la table (${BizzlyCalculator.formatFcfa(total)})", fontWeight = FontWeight.SemiBold)
                 }
 
-                OutlinedButton(
-                    onClick = { viewModel.shareTableInvoicePdf(tableNumber) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .testTag("table_pdf_btn")
+                // Bluetooth Thermal Printing card
+                BizzlyCard {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Imprimante thermique (${state.printerWidthMm} mm)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = tokens.text)
+                            Text(
+                                text = state.printerName ?: "Aucune imprimante sélectionnée",
+                                fontSize = 12.sp,
+                                color = if (state.printerAddress != null) tokens.accentReadable else tokens.muted,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        IconButton(
+                            onClick = { printerDialogOpen = true },
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("table_printer_settings_btn")
+                        ) {
+                            Icon(Icons.Default.Settings, contentDescription = "Configurer imprimante", tint = tokens.accentReadable)
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                if (state.printerAddress.isNullOrBlank()) printerDialogOpen = true
+                                else viewModel.printTableReceipt(tableNumber, isProforma = false)
+                            },
+                            enabled = !state.printerBusy,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("table_print_receipt_btn")
+                        ) {
+                            Icon(Icons.Default.Print, contentDescription = null, tint = tokens.text, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Ticket", color = tokens.text, fontSize = 12.sp, maxLines = 1)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                if (state.printerAddress.isNullOrBlank()) printerDialogOpen = true
+                                else viewModel.printTableReceipt(tableNumber, isProforma = true)
+                            },
+                            enabled = !state.printerBusy,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("table_print_proforma_btn")
+                        ) {
+                            Icon(Icons.Default.ReceiptLong, contentDescription = null, tint = tokens.text, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Note", color = tokens.text, fontSize = 12.sp, maxLines = 1)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                if (state.printerAddress.isNullOrBlank()) printerDialogOpen = true
+                                else viewModel.printKitchenBarTicket(tableNumber)
+                            },
+                            enabled = !state.printerBusy,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("table_print_kitchen_btn")
+                        ) {
+                            Icon(Icons.Default.RestaurantMenu, contentDescription = null, tint = tokens.text, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Bon Bar", color = tokens.text, fontSize = 12.sp, maxLines = 1)
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(Icons.Default.PictureAsPdf, contentDescription = null, tint = tokens.text)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Facture PDF", color = tokens.text)
+                    OutlinedButton(
+                        onClick = { viewModel.shareTableInvoicePdf(tableNumber, isProforma = false) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("table_pdf_btn")
+                    ) {
+                        Icon(Icons.Default.PictureAsPdf, contentDescription = null, tint = tokens.text, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Facture PDF", color = tokens.text, fontSize = 12.5.sp, maxLines = 1)
+                    }
+                    OutlinedButton(
+                        onClick = { viewModel.shareTableInvoicePdf(tableNumber, isProforma = true) },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("table_proforma_pdf_btn")
+                    ) {
+                        Icon(Icons.Default.PictureAsPdf, contentDescription = null, tint = tokens.text, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Note PDF", color = tokens.text, fontSize = 12.5.sp, maxLines = 1)
+                    }
                 }
 
                 OutlinedButton(
@@ -692,5 +939,51 @@ private fun TableDetailScreen(
 
             BizzlySignatureFooter()
         }
+    }
+
+    if (discountDialogOpen) {
+        TableDiscountDialog(
+            tableNumber = tableNumber,
+            data = data,
+            table = tbl,
+            onApply = { type, value, reason, compedMap ->
+                discountDialogOpen = false
+                viewModel.applyTableDiscountAndComped(tableNumber, type, value, reason, compedMap)
+            },
+            onDismiss = { discountDialogOpen = false }
+        )
+    }
+
+    if (splitDialogOpen) {
+        TableSplitBillDialog(
+            tableNumber = tableNumber,
+            data = data,
+            table = tbl,
+            onPayEqual = { totalParts, payments, cashGiven ->
+                splitDialogOpen = false
+                viewModel.payTableEqualSplit(tableNumber, totalParts, payments, cashGiven)
+            },
+            onPayByItems = { selectedItems, payments, cashGiven ->
+                splitDialogOpen = false
+                viewModel.payTableByItems(tableNumber, selectedItems, payments, cashGiven)
+            },
+            onDismiss = { splitDialogOpen = false }
+        )
+    }
+
+    if (printerDialogOpen) {
+        PrinterPickerDialog(
+            selectedAddress = state.printerAddress,
+            selectedName = state.printerName,
+            paperWidthMm = state.printerWidthMm,
+            pairedPrinters = state.pairedPrinters,
+            printerBusy = state.printerBusy,
+            onRefresh = viewModel::refreshPairedPrinters,
+            onSelectPrinter = viewModel::selectPrinter,
+            onClearPrinter = viewModel::clearSelectedPrinter,
+            onSelectWidthMm = viewModel::setPrinterWidthMm,
+            onTestPrint = viewModel::printTestReceipt,
+            onDismiss = { printerDialogOpen = false }
+        )
     }
 }

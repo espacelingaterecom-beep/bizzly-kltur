@@ -26,6 +26,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -33,10 +35,11 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -48,6 +51,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.bizzly.domain.BizzlyCalculator
 import com.example.bizzly.domain.StockAlertLevel
 import com.example.bizzly.model.BizzlyRole
@@ -56,6 +60,7 @@ import com.example.bizzly.ui.components.BizzlyCard
 import com.example.bizzly.ui.components.BizzlyHeroHeader
 import com.example.bizzly.ui.components.BizzlySignatureFooter
 import com.example.bizzly.ui.components.HeroPrimaryHighlight
+import com.example.bizzly.ui.components.bringIntoViewOnIme
 import com.example.bizzly.ui.theme.LocalBizzlyTokens
 import com.example.bizzly.ui.theme.SoraFontFamily
 import com.example.bizzly.ui.viewmodel.BizzlyUiState
@@ -156,6 +161,7 @@ fun SalesScreen(
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
+                        .bringIntoViewOnIme()
                         .testTag("sales_search_input")
                 )
             }
@@ -233,6 +239,8 @@ fun StockScreen(
 ) {
     val tokens = LocalBizzlyTokens.current
     val data = state.businessData
+    val lowStockInventory by viewModel.lowStockInventoryItems.collectAsStateWithLifecycle()
+    var stockMode by rememberSaveable { mutableIntStateOf(0) } // 0 = Inventaire Room & Alertes, 1 = Comptage Bar
     var seuilText by remember(data.seuil) { mutableStateOf(data.seuil.toString()) }
 
     var totalQty = 0.0
@@ -245,14 +253,72 @@ fun StockScreen(
 
     Column(modifier = Modifier.fillMaxWidth()) {
         BizzlyHeroHeader(
-            subtitle = "Début = au bar · Entrées = dépôt · Fin = comptage réel · Vendu = calcul auto",
+            subtitle = if (stockMode == 0) {
+                "Suivi des niveaux de stock & alertes de seuil"
+            } else {
+                "Début = au bar · Entrées = dépôt · Fin = comptage réel · Vendu = calcul auto"
+            },
             account = state.activeAccount,
             roleLabel = state.activeProfile?.let { BizzlyRole.fromKey(it.role).label },
             syncStatus = state.syncStatus,
             isDark = state.isDarkTheme,
             onToggleTheme = viewModel::toggleTheme,
             onLockClick = viewModel::lockNow
-        )
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                val alertSuffix = if (lowStockInventory.isNotEmpty()) " (${lowStockInventory.size})" else ""
+                FilterChip(
+                    selected = stockMode == 0,
+                    onClick = { stockMode = 0 },
+                    label = {
+                        Text(
+                            text = "Inventaire & Alertes$alertSuffix",
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = tokens.card,
+                        selectedLabelColor = tokens.text,
+                        containerColor = tokens.headerControlBg,
+                        labelColor = tokens.onHeader
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .testTag("stock_mode_inventory_chip")
+                )
+                FilterChip(
+                    selected = stockMode == 1,
+                    onClick = { stockMode = 1 },
+                    label = {
+                        Text(
+                            text = "Comptage Bar",
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = tokens.card,
+                        selectedLabelColor = tokens.text,
+                        containerColor = tokens.headerControlBg,
+                        labelColor = tokens.onHeader
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .testTag("stock_mode_bar_chip")
+                )
+            }
+        }
+
+        if (stockMode == 0) {
+            InventoryTrackerContent(state = state, viewModel = viewModel)
+            return@Column
+        }
 
         Column(
             modifier = Modifier
@@ -274,6 +340,7 @@ fun StockScreen(
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         modifier = Modifier
                             .width(96.dp)
+                            .bringIntoViewOnIme()
                             .onFocusChanged { focus ->
                                 if (!focus.isFocused && seuilText.toIntOrNull() != data.seuil) {
                                     seuilText.toIntOrNull()?.let { viewModel.setStockAlertThreshold(it) }
@@ -300,6 +367,32 @@ fun StockScreen(
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                         Box(modifier = Modifier.size(10.dp).clip(CircleShape).background(tokens.ko))
                         Text("critique", fontSize = 12.5.sp, color = tokens.muted)
+                    }
+                }
+                if (data.prod.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = viewModel::syncBarToInventory,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("bar_to_inv_sync_btn")
+                        ) {
+                            Text("Copier → Inventaire", color = tokens.text, fontSize = 12.sp, maxLines = 1)
+                        }
+                        OutlinedButton(
+                            onClick = viewModel::syncInventoryToBar,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("inv_to_bar_sync_btn")
+                        ) {
+                            Text("Importer de l’Inv.", color = tokens.text, fontSize = 12.sp, maxLines = 1)
+                        }
                     }
                 }
             }
@@ -370,6 +463,7 @@ fun StockScreen(
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 modifier = Modifier
                                     .weight(1f)
+                                    .bringIntoViewOnIme()
                                     .onFocusChanged {
                                         if (!it.isFocused && (dText.toDoubleOrNull() ?: 0.0) != p.d) {
                                             viewModel.updateProductField(p.id, "d", dText)
@@ -385,6 +479,7 @@ fun StockScreen(
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 modifier = Modifier
                                     .weight(1f)
+                                    .bringIntoViewOnIme()
                                     .onFocusChanged {
                                         if (!it.isFocused && (eText.toDoubleOrNull() ?: 0.0) != p.e) {
                                             viewModel.updateProductField(p.id, "e", eText)
@@ -400,6 +495,7 @@ fun StockScreen(
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 modifier = Modifier
                                     .weight(1f)
+                                    .bringIntoViewOnIme()
                                     .onFocusChanged {
                                         if (!it.isFocused) {
                                             val curVal = if (fText.trim().isEmpty()) null else fText.toDoubleOrNull()
@@ -611,6 +707,7 @@ private fun CashMovementSection(
                 singleLine = true,
                 modifier = Modifier
                     .weight(1f)
+                    .bringIntoViewOnIme()
                     .testTag("cash_label_$kind")
             )
             OutlinedTextField(
@@ -621,6 +718,7 @@ private fun CashMovementSection(
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 modifier = Modifier
                     .weight(1f)
+                    .bringIntoViewOnIme()
                     .testTag("cash_amount_$kind")
             )
         }
@@ -676,6 +774,7 @@ private fun CashMovementSection(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     modifier = Modifier
                         .weight(0.8f)
+                        .bringIntoViewOnIme()
                         .testTag("cash_dep_qty_input")
                 )
             }
@@ -689,6 +788,7 @@ private fun CashMovementSection(
             singleLine = true,
             modifier = Modifier
                 .fillMaxWidth()
+                .bringIntoViewOnIme()
                 .testTag("cash_date_$kind")
         )
         Spacer(modifier = Modifier.height(8.dp))

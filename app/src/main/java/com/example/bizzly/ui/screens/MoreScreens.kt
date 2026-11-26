@@ -1,8 +1,5 @@
 package com.example.bizzly.ui.screens
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.graphics.Paint
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -32,14 +29,19 @@ import androidx.compose.material.icons.filled.Assessment
 import androidx.compose.material.icons.filled.Business
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Group
+import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.LocalOffer
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Policy
+import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -49,10 +51,15 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -79,12 +86,17 @@ import androidx.compose.ui.unit.sp
 import com.example.bizzly.domain.BizzlyCalculator
 import com.example.bizzly.model.BizzlyRole
 import com.example.bizzly.model.BizzlyTab
+import com.example.bizzly.model.PrinterPaperWidth
 import com.example.bizzly.model.SyncStatus
 import com.example.bizzly.ui.components.BizzlyCard
 import com.example.bizzly.ui.components.BizzlyHeroHeader
 import com.example.bizzly.ui.components.BizzlySignatureFooter
 import com.example.bizzly.ui.components.BrandColorSwatch
 import com.example.bizzly.ui.components.BusinessAvatarBox
+import com.example.bizzly.ui.components.LegalDocumentTab
+import com.example.bizzly.ui.components.LegalDocumentsDialog
+import com.example.bizzly.ui.components.LogoThemeProposalsSection
+import com.example.bizzly.ui.components.bringIntoViewOnIme
 import com.example.bizzly.ui.theme.LocalBizzlyTokens
 import com.example.bizzly.ui.theme.SoraFontFamily
 import com.example.bizzly.ui.viewmodel.BizzlyUiState
@@ -98,6 +110,7 @@ fun MoreMenuScreen(
     viewModel: BizzlyViewModel
 ) {
     val tokens = LocalBizzlyTokens.current
+    var showLegalDialog by remember { mutableStateOf(false) }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         BizzlyHeroHeader(
@@ -116,6 +129,12 @@ fun MoreMenuScreen(
                 .padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+
+            if (viewModel.canTab(BizzlyTab.INVENTORY)) {
+                MoreOptionButton(Icons.Default.Inventory2, "Inventaire & alertes de stock", "more_inv_btn") {
+                    viewModel.selectTab(BizzlyTab.INVENTORY)
+                }
+            }
             if (viewModel.canTab(BizzlyTab.PROD)) {
                 MoreOptionButton(Icons.Default.LocalOffer, "Produits et prix", "more_prod_btn") {
                     viewModel.selectTab(BizzlyTab.PROD)
@@ -157,12 +176,23 @@ fun MoreMenuScreen(
                 }
             }
 
+            MoreOptionButton(Icons.Default.Policy, "Confidentialité, CGU & Mentions légales", "more_legal_btn") {
+                showLegalDialog = true
+            }
+
             MoreOptionButton(Icons.Default.Business, "Changer d’entreprise", "more_switch_biz_btn") {
                 viewModel.switchBusiness()
             }
 
-            BizzlySignatureFooter()
+            BizzlySignatureFooter(onAdminClick = viewModel::openAdminPanel)
         }
+    }
+
+    if (showLegalDialog) {
+        LegalDocumentsDialog(
+            initialTab = LegalDocumentTab.PRIVACY,
+            onDismiss = { showLegalDialog = false }
+        )
     }
 
     if (state.rekeyDialogVisible) {
@@ -222,13 +252,14 @@ fun ProductsScreen(
         ) {
             OutlinedButton(
                 onClick = { viewModel.selectTab(BizzlyTab.MORE) },
+                border = BorderStroke(1.dp, tokens.headerControlBorder),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp)
             ) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, tint = tokens.text)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, tint = tokens.onHeader)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Retour aux options", color = tokens.text)
+                Text("Retour aux options", color = tokens.onHeader)
             }
         }
 
@@ -247,6 +278,7 @@ fun ProductsScreen(
                         singleLine = true,
                         modifier = Modifier
                             .weight(1.2f)
+                            .bringIntoViewOnIme()
                             .testTag("prod_new_name_input")
                     )
                     OutlinedTextField(
@@ -257,6 +289,7 @@ fun ProductsScreen(
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         modifier = Modifier
                             .weight(0.8f)
+                            .bringIntoViewOnIme()
                             .testTag("prod_new_price_input")
                     )
                 }
@@ -328,6 +361,7 @@ fun ProductsScreen(
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                                 modifier = Modifier
                                     .width(100.dp)
+                                    .bringIntoViewOnIme()
                                     .onFocusChanged { focus ->
                                         if (!focus.isFocused && (priceText.toDoubleOrNull() ?: 0.0) != prod.pv) {
                                             viewModel.updateProductField(prod.id, "pv", priceText)
@@ -372,11 +406,18 @@ fun EnterpriseScreen(
     var newProfRole by remember { mutableStateOf(BizzlyRole.SERVEUR.key) }
     var newRoleExpanded by remember { mutableStateOf(false) }
     var tablesText by remember(data.nt) { mutableStateOf(data.nt.toString()) }
+    var printerDialogOpen by remember { mutableStateOf(false) }
 
     val logoPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) viewModel.pickAccountLogo(uri)
+    }
+
+    LaunchedEffect(acc.id, acc.logo) {
+        if (acc.logo.isNotBlank() && state.enterpriseLogoProposals.isEmpty()) {
+            viewModel.refreshEnterpriseLogoProposals()
+        }
     }
 
     BackHandler { viewModel.selectTab(BizzlyTab.MORE) }
@@ -393,13 +434,14 @@ fun EnterpriseScreen(
         ) {
             OutlinedButton(
                 onClick = { viewModel.selectTab(BizzlyTab.MORE) },
+                border = BorderStroke(1.dp, tokens.headerControlBorder),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp)
             ) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, tint = tokens.text)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, tint = tokens.onHeader)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Retour aux options", color = tokens.text)
+                Text("Retour aux options", color = tokens.onHeader)
             }
         }
 
@@ -453,6 +495,7 @@ fun EnterpriseScreen(
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
+                        .bringIntoViewOnIme()
                         .onFocusChanged { if (!it.isFocused && nameText != acc.name) viewModel.updateBusinessField("name", nameText) }
                 )
                 Spacer(modifier = Modifier.height(8.dp))
@@ -464,6 +507,7 @@ fun EnterpriseScreen(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
                     modifier = Modifier
                         .fillMaxWidth()
+                        .bringIntoViewOnIme()
                         .onFocusChanged { if (!it.isFocused && emailText != acc.email) viewModel.updateBusinessField("email", emailText) }
                 )
                 Spacer(modifier = Modifier.height(8.dp))
@@ -475,6 +519,7 @@ fun EnterpriseScreen(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                     modifier = Modifier
                         .fillMaxWidth()
+                        .bringIntoViewOnIme()
                         .onFocusChanged { if (!it.isFocused && telText != acc.tel) viewModel.updateBusinessField("tel", telText) }
                 )
                 Spacer(modifier = Modifier.height(8.dp))
@@ -485,6 +530,7 @@ fun EnterpriseScreen(
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
+                        .bringIntoViewOnIme()
                         .onFocusChanged { if (!it.isFocused && addrText != acc.addr) viewModel.updateBusinessField("addr", addrText) }
                 )
                 Spacer(modifier = Modifier.height(8.dp))
@@ -493,8 +539,16 @@ fun EnterpriseScreen(
 
             // Colors
             BizzlyCard {
-                Text("Couleurs", fontSize = 13.sp, color = tokens.muted)
-                Spacer(modifier = Modifier.height(8.dp))
+                Text("Couleurs et thème de l’application", fontSize = 13.sp, color = tokens.muted)
+                if (state.enterpriseLogoProposals.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    LogoThemeProposalsSection(
+                        proposals = state.enterpriseLogoProposals,
+                        currentBrand = acc.brand,
+                        onSelectProposal = viewModel::applyEnterpriseBrand
+                    )
+                }
+                Spacer(modifier = Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     BrandColorSwatch(
                         label = "Principale",
@@ -555,6 +609,7 @@ fun EnterpriseScreen(
                             singleLine = true,
                             modifier = Modifier
                                 .weight(1f)
+                                .bringIntoViewOnIme()
                                 .onFocusChanged { if (!it.isFocused && profNameText != p.name) viewModel.renameProfile(p.id, profNameText) }
                         )
                         IconButton(
@@ -625,6 +680,7 @@ fun EnterpriseScreen(
                         singleLine = true,
                         modifier = Modifier
                             .weight(1.1f)
+                            .bringIntoViewOnIme()
                             .testTag("ent_new_prof_name")
                     )
                     Box(modifier = Modifier.weight(0.9f)) {
@@ -689,6 +745,7 @@ fun EnterpriseScreen(
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                         modifier = Modifier
                             .weight(1f)
+                            .bringIntoViewOnIme()
                             .testTag("ent_tables_count_input")
                     )
                     Button(
@@ -800,6 +857,76 @@ fun EnterpriseScreen(
                 }
             }
 
+            // Bluetooth Thermal Printer card
+            BizzlyCard {
+                Text("Imprimante thermique Bluetooth (ESC/POS)", fontSize = 13.sp, color = tokens.muted)
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = state.printerName ?: "Aucune imprimante configurée",
+                    fontWeight = FontWeight.Bold,
+                    color = if (state.printerAddress != null) tokens.text else tokens.muted
+                )
+                if (!state.printerAddress.isNullOrBlank()) {
+                    Text(
+                        text = state.printerAddress,
+                        fontSize = 12.sp,
+                        color = tokens.muted
+                    )
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    PrinterPaperWidth.entries.forEach { width ->
+                        FilterChip(
+                            selected = state.printerWidthMm == width.mm,
+                            onClick = { viewModel.setPrinterWidthMm(width.mm) },
+                            label = { Text(width.label, fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = tokens.primary,
+                                selectedLabelColor = tokens.onPrimary
+                            ),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("ent_printer_width_${width.mm}")
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = { printerDialogOpen = true },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = tokens.primary,
+                            contentColor = tokens.onPrimary
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
+                            .testTag("ent_printer_pick_btn")
+                    ) {
+                        Icon(Icons.Default.Print, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(if (state.printerAddress == null) "Choisir imprimante" else "Changer")
+                    }
+                    if (!state.printerAddress.isNullOrBlank()) {
+                        OutlinedButton(
+                            onClick = viewModel::printTestReceipt,
+                            enabled = !state.printerBusy,
+                            modifier = Modifier
+                                .height(48.dp)
+                                .testTag("ent_printer_test_btn")
+                        ) {
+                            Text(if (state.printerBusy) "…" else "Tester", color = tokens.text)
+                        }
+                    }
+                }
+            }
+
             OutlinedButton(
                 onClick = viewModel::lockNow,
                 modifier = Modifier
@@ -823,6 +950,22 @@ fun EnterpriseScreen(
 
             BizzlySignatureFooter()
         }
+    }
+
+    if (printerDialogOpen) {
+        PrinterPickerDialog(
+            selectedAddress = state.printerAddress,
+            selectedName = state.printerName,
+            paperWidthMm = state.printerWidthMm,
+            pairedPrinters = state.pairedPrinters,
+            printerBusy = state.printerBusy,
+            onRefresh = viewModel::refreshPairedPrinters,
+            onSelectPrinter = viewModel::selectPrinter,
+            onClearPrinter = viewModel::clearSelectedPrinter,
+            onSelectWidthMm = viewModel::setPrinterWidthMm,
+            onTestPrint = viewModel::printTestReceipt,
+            onDismiss = { printerDialogOpen = false }
+        )
     }
 
     if (state.syncCodeDialogVisible) {
@@ -863,8 +1006,7 @@ fun EnterpriseScreen(
                         }
                         OutlinedButton(
                             onClick = {
-                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                cm.setPrimaryClip(ClipData.newPlainText("Code Bizzly", codeFormatted))
+                                ExportUtils.copySensitiveToClipboard(context, "Code Bizzly", codeFormatted)
                                 viewModel.showToast("Code copié.")
                             },
                             modifier = Modifier.weight(1f)
@@ -989,13 +1131,14 @@ fun QrMenuScreen(
         ) {
             OutlinedButton(
                 onClick = { viewModel.selectTab(BizzlyTab.MORE) },
+                border = BorderStroke(1.dp, tokens.headerControlBorder),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp)
             ) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, tint = tokens.text)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, tint = tokens.onHeader)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Retour aux options", color = tokens.text)
+                Text("Retour aux options", color = tokens.onHeader)
             }
         }
 
@@ -1078,19 +1221,20 @@ fun HistoryScreen(
     val context = LocalContext.current
     val data = state.businessData
 
+    val scope = rememberCoroutineScope()
+
     val createBackupLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/json")
     ) { uri ->
         if (uri != null) {
             val pair = viewModel.buildBackupJsonAndMarkSaved() ?: return@rememberLauncherForActivityResult
-            runCatching {
-                context.contentResolver.openOutputStream(uri)?.use { out ->
-                    out.write(pair.second.toByteArray())
+            scope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    ExportUtils.writeUriBytes(context, uri, pair.second.toByteArray(Charsets.UTF_8))
                 }
-            }.onSuccess {
-                viewModel.showToast("Sauvegarde enregistrée.")
-            }.onFailure {
-                viewModel.showToast("Impossible d’enregistrer la sauvegarde.")
+                viewModel.showToast(
+                    if (ok) "Sauvegarde enregistrée." else "Impossible d’enregistrer la sauvegarde."
+                )
             }
         }
     }
@@ -1115,13 +1259,14 @@ fun HistoryScreen(
         ) {
             OutlinedButton(
                 onClick = { viewModel.selectTab(BizzlyTab.MORE) },
+                border = BorderStroke(1.dp, tokens.headerControlBorder),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp)
             ) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, tint = tokens.text)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null, tint = tokens.onHeader)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Retour aux options", color = tokens.text)
+                Text("Retour aux options", color = tokens.onHeader)
             }
         }
 

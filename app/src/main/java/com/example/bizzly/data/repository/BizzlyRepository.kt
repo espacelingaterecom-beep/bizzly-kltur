@@ -18,6 +18,7 @@ import com.example.bizzly.model.CashMovement
 import com.example.bizzly.model.ClosedPeriod
 import com.example.bizzly.model.OpenTable
 import com.example.bizzly.model.PaidInvoice
+import com.example.bizzly.model.PaymentPart
 import com.example.bizzly.model.Product
 import com.example.bizzly.model.ServerEntry
 import com.example.bizzly.model.SyncCredentials
@@ -115,6 +116,15 @@ class BizzlyRepository(
         return dao.getAllSyncStates().map { it.syncKey }.toSet()
     }
 
+    suspend fun getAllSyncStatesMap(): Map<String, SyncCredentials> {
+        return dao.getAllSyncStates().associate { entity ->
+            val snap = runCatching {
+                json.decodeFromString<Map<String, String>>(entity.snapJson)
+            }.getOrDefault(emptyMap())
+            entity.businessId to SyncCredentials(key = entity.syncKey, seq = entity.seq, snap = snap)
+        }
+    }
+
     suspend fun saveSyncCredentials(businessId: String, creds: SyncCredentials) {
         dao.upsertSyncState(
             SyncStateEntity(
@@ -142,6 +152,71 @@ class BizzlyRepository(
 
     fun setDarkThemePreference(isDark: Boolean) {
         prefs.edit().putBoolean("dark_theme", isDark).apply()
+    }
+
+    fun getPrinterAddress(): String? = prefs.getString("bt_printer_address", null)?.takeIf { it.isNotBlank() }
+
+    fun setPrinterAddress(address: String?) {
+        if (address.isNullOrBlank()) prefs.edit().remove("bt_printer_address").apply()
+        else prefs.edit().putString("bt_printer_address", address.trim()).apply()
+    }
+
+    fun getPrinterName(): String? = prefs.getString("bt_printer_name", null)?.takeIf { it.isNotBlank() }
+
+    fun setPrinterName(name: String?) {
+        if (name.isNullOrBlank()) prefs.edit().remove("bt_printer_name").apply()
+        else prefs.edit().putString("bt_printer_name", name.trim()).apply()
+    }
+
+    fun getPrinterWidthMm(): Int {
+        val w = prefs.getInt("bt_printer_width_mm", 58)
+        return if (w >= 80) 80 else 58
+    }
+
+    fun setPrinterWidthMm(mm: Int) {
+        prefs.edit().putInt("bt_printer_width_mm", if (mm >= 80) 80 else 58).apply()
+    }
+
+    fun hasAdminCredential(): Boolean {
+        val salt = prefs.getString("kltur_admin_salt", null).orEmpty()
+        val hash = prefs.getString("kltur_admin_hash", null).orEmpty()
+        return salt.isNotBlank() && hash.isNotBlank()
+    }
+
+    fun saveAdminCredential(salt: String, hash: String) {
+        prefs.edit()
+            .putString("kltur_admin_salt", salt)
+            .putString("kltur_admin_hash", hash)
+            .apply()
+    }
+
+    fun verifyAdminCredential(secret: String): Boolean {
+        val salt = prefs.getString("kltur_admin_salt", null).orEmpty()
+        val hash = prefs.getString("kltur_admin_hash", null).orEmpty()
+        return com.example.bizzly.security.PinSecurity.verifyCredential(salt, hash, secret)
+    }
+
+    fun getNetlifyAdminUrl(): String {
+        val saved = prefs.getString("kltur_netlify_url", "").orEmpty()
+        return if (saved.isBlank()) "https://bizzly-gestion.netlify.app/kltur-admin.html" else saved
+    }
+
+    fun setNetlifyAdminUrl(url: String) {
+        val trimmed = url.trim()
+        if (trimmed.isEmpty()) {
+            prefs.edit().remove("kltur_netlify_url").apply()
+        } else if (isValidHttpsUrl(trimmed)) {
+            prefs.edit().putString("kltur_netlify_url", trimmed).apply()
+        }
+    }
+
+    fun isValidHttpsUrl(raw: String): Boolean {
+        val trimmed = raw.trim()
+        if (!trimmed.startsWith("https://", ignoreCase = true)) return false
+        return runCatching {
+            val u = java.net.URI(trimmed)
+            u.scheme.equals("https", ignoreCase = true) && !u.host.isNullOrBlank()
+        }.getOrDefault(false)
     }
 
     fun createBackupJson(account: BusinessAccount, data: BusinessData): String {
@@ -176,6 +251,24 @@ class BizzlyRepository(
                 null
             }
         }.getOrNull()
+    }
+
+    companion object {
+        const val MAX_BACKUP_BYTES: Int = 10 * 1024 * 1024
+
+        fun readStreamBoundedUtf8(input: java.io.InputStream, maxBytes: Int = MAX_BACKUP_BYTES): String? {
+            val buffer = ByteArray(8192)
+            val out = java.io.ByteArrayOutputStream()
+            var total = 0
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                total += read
+                if (total > maxBytes) return null
+                out.write(buffer, 0, read)
+            }
+            return out.toString(Charsets.UTF_8.name())
+        }
     }
 
     fun freshBusinessData(): BusinessData = BusinessData(
@@ -262,9 +355,17 @@ class BizzlyRepository(
             t = p.t,
             sv = p.sv,
             tot = BizzlyCalculator.clampNumber(p.tot),
-            m = cleanText(p.m, 30).ifBlank { "Espèces" },
+            m = cleanText(p.m, 60).ifBlank { "Espèces" },
             u = cleanUid(p.u),
-            ts = p.ts
+            ts = p.ts,
+            payments = p.payments.take(10).map { part ->
+                PaymentPart(
+                    mode = cleanText(part.mode, 30).ifBlank { "Espèces" },
+                    amount = BizzlyCalculator.clampNumber(part.amount).coerceAtLeast(0.0)
+                )
+            },
+            discountAmount = BizzlyCalculator.clampNumber(p.discountAmount).coerceAtLeast(0.0),
+            discountReason = cleanText(p.discountReason, 120)
         )
         fun cleanSvMap(sv: Map<String, Map<String, Double>>): Map<String, Map<String, Double>> {
             val out = LinkedHashMap<String, Map<String, Double>>()
@@ -290,8 +391,29 @@ class BizzlyRepository(
                     items[pidStr] = BizzlyCalculator.clampNumber(q)
                 }
             }
+            val comped = LinkedHashMap<String, Double>()
+            for ((pidStr, cq) in tbl.comped) {
+                val maxQ = items[pidStr] ?: 0.0
+                if (maxQ > 0.0 && cq > 0.0) {
+                    comped[pidStr] = BizzlyCalculator.clampNumber(cq).coerceAtMost(maxQ)
+                }
+            }
+            val discType = when (tbl.discountType) {
+                "percent", "amount" -> tbl.discountType
+                else -> "none"
+            }
             if (items.isNotEmpty() || tbl.sv != 0L) {
-                cleanTb[key] = OpenTable(sv = tbl.sv, it = items)
+                cleanTb[key] = OpenTable(
+                    sv = tbl.sv,
+                    it = items,
+                    comped = comped,
+                    discountType = discType,
+                    discountValue = if (discType == "none") 0.0 else BizzlyCalculator.clampNumber(tbl.discountValue).coerceAtLeast(0.0),
+                    discountReason = if (discType == "none") "" else cleanText(tbl.discountReason, 120),
+                    paidPartial = BizzlyCalculator.clampNumber(tbl.paidPartial).coerceAtLeast(0.0),
+                    paidCount = tbl.paidCount.coerceIn(0, 50),
+                    splitTotalParts = tbl.splitTotalParts.coerceIn(0, 50)
+                )
             }
         }
 
